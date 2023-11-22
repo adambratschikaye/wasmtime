@@ -29,7 +29,7 @@ struct JitDumpAgent {
 static JITDUMP_FILE: Mutex<Option<JitDumpFile>> = Mutex::new(None);
 
 /// Intialize a JitDumpAgent and write out the header.
-pub fn new() -> Result<Box<dyn ProfilingAgent>> {
+pub fn new<T>() -> Result<Box<dyn ProfilingAgent<Memory = T>>> {
     let mut jitdump_file = JITDUMP_FILE.lock().unwrap();
 
     if jitdump_file.is_none() {

@@ -133,7 +133,7 @@ impl Component {
 
         let (mmap, artifacts) = Component::build_artifacts(engine, binary)?;
         let mut code_memory = CodeMemory::new(mmap)?;
-        code_memory.publish()?;
+        code_memory.publish(crate::engine::LIBCALLS)?;
         Component::from_parts(engine, Arc::new(code_memory), Some(artifacts))
     }
 
@@ -224,7 +224,7 @@ impl Component {
         };
         object.serialize_info(&artifacts);
 
-        let mmap = object.finish()?;
+        let mmap = object.finish::<crate::module::ObjectMmap>()?;
         Ok((mmap, artifacts))
     }
 

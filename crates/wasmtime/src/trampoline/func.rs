@@ -94,12 +94,13 @@ where
             &mut obj,
         )?;
     engine.append_bti(&mut obj);
-    let obj = wasmtime_jit::ObjectBuilder::new(obj, &engine.config().tunables).finish()?;
+    let obj = wasmtime_jit::ObjectBuilder::new(obj, &engine.config().tunables)
+        .finish::<crate::module::ObjectMmap>()?;
 
     // Copy the results of JIT compilation into executable memory, and this will
     // also take care of unwind table registration.
     let mut code_memory = CodeMemory::new(obj)?;
-    code_memory.publish()?;
+    code_memory.publish(crate::engine::LIBCALLS)?;
 
     engine.profiler().register_module(&code_memory, &|_| None);
 

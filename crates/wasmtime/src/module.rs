@@ -344,7 +344,7 @@ impl Module {
 
         fn publish_mmap(mmap: MmapVec) -> Result<Arc<CodeMemory>> {
             let mut code = CodeMemory::new(mmap)?;
-            code.publish()?;
+            code.publish(crate::engine::LIBCALLS)?;
             Ok(Arc::new(code))
         }
     }
@@ -445,7 +445,7 @@ impl Module {
 
         let info = compilation_artifacts.unwrap_as_module_info();
         object.serialize_info(&(&info, &types));
-        let mmap = object.finish()?;
+        let mmap = object.finish::<ObjectMmap>()?;
 
         Ok((mmap, Some((info, types))))
     }
@@ -1345,6 +1345,53 @@ fn memory_images(engine: &Engine, module: &CompiledModule) -> Result<Option<Modu
     ModuleMemoryImages::new(module.module(), module.code_memory().wasm_data(), mmap)
 }
 
+/// Helper struct to implement the `WritableBuffer` trait from the `object`
+/// crate.
+///
+/// This enables writing an object directly into an mmap'd memory so it's
+/// immediately usable for execution after compilation. This implementation
+/// relies on a call to `reserve` happening once up front with all the needed
+/// data, and the mmap internally does not attempt to grow afterwards.
+#[derive(Default)]
+pub(crate) struct ObjectMmap {
+    mmap: Option<MmapVec>,
+    len: usize,
+    err: Option<Error>,
+}
+
+impl WritableBuffer for ObjectMmap {
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn reserve(&mut self, additional: usize) -> Result<(), ()> {
+        assert!(self.mmap.is_none(), "cannot reserve twice");
+        self.mmap = match MmapVec::with_capacity(additional) {
+            Ok(mmap) => Some(mmap),
+            Err(e) => {
+                self.err = Some(e);
+                return Err(());
+            }
+        };
+        Ok(())
+    }
+
+    fn resize(&mut self, new_len: usize) {
+        // Resizing always appends 0 bytes and since new mmaps start out as 0
+        // bytes we don't actually need to do anything as part of this other
+        // than update our own length.
+        if new_len <= self.len {
+            return;
+        }
+        self.len = new_len;
+    }
+
+    fn write_bytes(&mut self, val: &[u8]) {
+        let mmap = self.mmap.as_mut().expect("write before reserve");
+        mmap[self.len..][..val.len()].copy_from_slice(val);
+        self.len += val.len();
+    }
+}
 #[cfg(test)]
 mod tests {
     use crate::{Engine, Module};

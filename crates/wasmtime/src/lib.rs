@@ -428,6 +428,7 @@ mod store;
 mod trampoline;
 mod trap;
 mod types;
+mod unwind;
 mod v128;
 mod values;
 

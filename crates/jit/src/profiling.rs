@@ -1,5 +1,7 @@
 #![allow(missing_docs)]
 
+use std::marker::PhantomData;
+
 use crate::CodeMemory;
 #[allow(unused_imports)]
 use anyhow::{bail, Result};
@@ -9,7 +11,7 @@ cfg_if::cfg_if! {
         mod jitdump;
         pub use jitdump::new as new_jitdump;
     } else {
-        pub fn new_jitdump() -> Result<Box<dyn ProfilingAgent>> {
+        pub fn new_jitdump<T>() -> Result<Box<dyn ProfilingAgent<Memory = T>>> {
             if cfg!(feature = "jitdump") {
                 bail!("jitdump is not supported on this platform");
             } else {
@@ -24,7 +26,7 @@ cfg_if::cfg_if! {
         mod perfmap;
         pub use perfmap::new as new_perfmap;
     } else {
-        pub fn new_perfmap() -> Result<Box<dyn ProfilingAgent>> {
+        pub fn new_perfmap<T>() -> Result<Box<dyn ProfilingAgent<Memory = T>>> {
             bail!("perfmap support not supported on this platform");
         }
     }
@@ -37,7 +39,7 @@ cfg_if::cfg_if! {
         mod vtune;
         pub use vtune::new as new_vtune;
     } else {
-        pub fn new_vtune() -> Result<Box<dyn ProfilingAgent>> {
+        pub fn new_vtune<T>() -> Result<Box<dyn ProfilingAgent<Memory = T>>> {
             if cfg!(feature = "vtune") {
                 bail!("VTune is not supported on this platform.");
             } else {
@@ -49,9 +51,15 @@ cfg_if::cfg_if! {
 
 /// Common interface for profiling tools.
 pub trait ProfilingAgent: Send + Sync + 'static {
+    type Memory;
+
     fn register_function(&self, name: &str, addr: *const u8, size: usize);
 
-    fn register_module(&self, code: &CodeMemory, custom_name: &dyn Fn(usize) -> Option<String>) {
+    fn register_module(
+        &self,
+        code: &CodeMemory<Self::Memory>,
+        custom_name: &dyn Fn(usize) -> Option<String>,
+    ) {
         use object::{File, Object as _, ObjectSection, ObjectSymbol, SectionKind, SymbolKind};
 
         let image = match File::parse(&code.mmap()[..]) {
@@ -95,14 +103,20 @@ pub trait ProfilingAgent: Send + Sync + 'static {
     }
 }
 
-pub fn new_null() -> Box<dyn ProfilingAgent> {
+pub fn new_null<T>() -> Box<dyn ProfilingAgent<Memory = T>> {
     Box::new(NullProfilerAgent)
 }
 
 #[derive(Debug, Default, Clone, Copy)]
-struct NullProfilerAgent;
+struct NullProfilerAgent<T>;
 
-impl ProfilingAgent for NullProfilerAgent {
+impl<T> ProfilingAgent for NullProfilerAgent<T> {
+    type Memory = T;
     fn register_function(&self, _name: &str, _addr: *const u8, _size: usize) {}
-    fn register_module(&self, _code: &CodeMemory, _custom_name: &dyn Fn(usize) -> Option<String>) {}
+    fn register_module(
+        &self,
+        _code: &CodeMemory<T>,
+        _custom_name: &dyn Fn(usize) -> Option<String>,
+    ) {
+    }
 }

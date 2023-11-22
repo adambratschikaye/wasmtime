@@ -31,7 +31,7 @@ struct State {
 }
 
 /// Initialize a VTuneAgent.
-pub fn new() -> Result<Box<dyn ProfilingAgent>> {
+pub fn new<T>() -> Result<Box<dyn ProfilingAgent<Memory = T>>> {
     Ok(Box::new(VTuneAgent {
         state: Mutex::new(State {
             vtune: Default::default(),

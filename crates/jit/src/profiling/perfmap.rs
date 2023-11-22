@@ -1,6 +1,7 @@
 use crate::profiling::ProfilingAgent;
 use anyhow::Result;
 use std::io::{self, BufWriter, Write};
+use std::marker::PhantomData;
 use std::process;
 use std::{fs::File, sync::Mutex};
 
@@ -8,19 +9,23 @@ use std::{fs::File, sync::Mutex};
 static PERFMAP_FILE: Mutex<Option<BufWriter<File>>> = Mutex::new(None);
 
 /// Interface for driving the creation of jitdump files
-struct PerfMapAgent;
+struct PerfMapAgent<T> {
+    _phantom: T,
+}
 
 /// Intialize a JitDumpAgent and write out the header.
-pub fn new() -> Result<Box<dyn ProfilingAgent>> {
+pub fn new<T>() -> Result<Box<dyn ProfilingAgent<Memory = T>>> {
     let mut file = PERFMAP_FILE.lock().unwrap();
     if file.is_none() {
         let filename = format!("/tmp/perf-{}.map", process::id());
         *file = Some(BufWriter::new(File::create(filename)?));
     }
-    Ok(Box::new(PerfMapAgent))
+    Ok(Box::new(PerfMapAgent {
+        _phantom: PhantomData,
+    }))
 }
 
-impl PerfMapAgent {
+impl<T> PerfMapAgent<T> {
     fn make_line(
         writer: &mut dyn Write,
         name: &str,
@@ -37,6 +42,7 @@ impl PerfMapAgent {
 }
 
 impl ProfilingAgent for PerfMapAgent {
+    type Memory = T;
     fn register_function(&self, name: &str, addr: *const u8, size: usize) {
         let mut file = PERFMAP_FILE.lock().unwrap();
         let file = file.as_mut().unwrap();

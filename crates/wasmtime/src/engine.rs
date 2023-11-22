@@ -13,10 +13,24 @@ use std::sync::Arc;
 use wasmtime_cache::CacheConfig;
 use wasmtime_environ::obj;
 use wasmtime_environ::{FlagValue, ObjectKind};
-use wasmtime_jit::{profiling::ProfilingAgent, CodeMemory};
-use wasmtime_runtime::{CompiledModuleIdAllocator, InstanceAllocator, MmapVec};
+use wasmtime_jit::{code_memory::LibCalls, profiling::ProfilingAgent, CodeMemory};
+use wasmtime_runtime::{libcalls::relocs, CompiledModuleIdAllocator, InstanceAllocator, MmapVec};
 
 mod serialization;
+
+pub(crate) const LIBCALLS: LibCalls = LibCalls {
+    floorf32: relocs::floorf32 as usize,
+    floorf64: relocs::floor64 as usize,
+    nearestf32: relocs::nearestf32 as usize,
+    nearestf64: relocs::nearestf64 as usize,
+    ceilf32: relocs::ceilf32 as usize,
+    ceilf64: relocs::ceilf54 as usize,
+    truncf32: relocs::truncf32 as usize,
+    truncf64: relocs::truncf64 as usize,
+    fmaf32: relocs::fmaf32 as usize,
+    fmaf64: relocs::fmaf64 as usize,
+    x86_pshufb: relocs::x86_pshufb as usize,
+};
 
 /// An `Engine` which is a global context for compilation and management of wasm
 /// modules.
@@ -628,7 +642,7 @@ impl Engine {
     pub(crate) fn load_code(&self, mmap: MmapVec, expected: ObjectKind) -> Result<Arc<CodeMemory>> {
         serialization::check_compatible(self, &mmap, expected)?;
         let mut code = CodeMemory::new(mmap)?;
-        code.publish()?;
+        code.publish(LIBCALLS)?;
         Ok(Arc::new(code))
     }
 
@@ -673,6 +687,436 @@ pub enum Precompiled {
     Component,
 }
 
+struct MmapCodeMemory {
+    memory: ManuallyDrop<CodeMemory<MmapVec>>,
+    unwind_registration: ManuallyDrop<Option<UnwindRegistration>>,
+    published: bool,
+}
+
+impl Drop for MmapCodeMemory {
+    fn drop(&mut self) {
+        // Drop `unwind_registration` before `self.memory`
+        unsafe {
+            ManuallyDrop::drop(&mut self.unwind_registration);
+            ManuallyDrop::drop(&mut self.memory);
+        }
+    }
+}
+
+impl MmapCodeMemory {
+    unsafe fn register_unwind_info(&mut self) -> Result<()> {
+        if self.memory.unwind().len() == 0 {
+            return Ok(());
+        }
+        let text = self.memory.text();
+        let unwind_info = self.memory.unwind();
+        let registration =
+            UnwindRegistration::new(text.as_ptr(), unwind_info.as_ptr(), unwind_info.len())
+                .context("failed to create unwind info registration")?;
+        *self.unwind_registration = Some(registration);
+        Ok(())
+    }
+
+    /// Publishes the internal ELF image to be ready for execution.
+    ///
+    /// This method can only be called once and will panic if called twice. This
+    /// will parse the ELF image from the original `MmapVec` and do everything
+    /// necessary to get it ready for execution, including:
+    ///
+    /// * Change page protections from read/write to read/execute.
+    /// * Register unwinding information with the OS
+    ///
+    /// After this function executes all JIT code should be ready to execute.
+    pub fn publish(&mut self, libcalls: LibCalls) -> Result<()> {
+        assert!(!self.published);
+        self.published = true;
+
+        if self.memory.text().is_empty() {
+            return Ok(());
+        }
+
+        // The unsafety here comes from a few things:
+        //
+        // * We're actually updating some page protections to executable memory.
+        //
+        // * We're registering unwinding information which relies on the
+        //   correctness of the information in the first place. This applies to
+        //   both the actual unwinding tables as well as the validity of the
+        //   pointers we pass in itself.
+        unsafe {
+            // First, if necessary, apply relocations. This can happen for
+            // things like libcalls which happen late in the lowering process
+            // that don't go through the Wasm-based libcalls layer that's
+            // indirected through the `VMContext`. Note that most modules won't
+            // have relocations, so this typically doesn't do anything.
+            self.memory.apply_relocations(libcalls)?;
+
+            // Next freeze the contents of this image by making all of the
+            // memory readonly. Nothing after this point should ever be modified
+            // so commit everything. For a compiled-in-memory image this will
+            // mean IPIs to evict writable mappings from other cores. For
+            // loaded-from-disk images this shouldn't result in IPIs so long as
+            // there weren't any relocations because nothing should have
+            // otherwise written to the image at any point either.
+            self.memory.mmap.make_readonly(0..self.mmap.len())?;
+
+            let text = self.memory.text();
+
+            // Clear the newly allocated code from cache if the processor requires it
+            //
+            // Do this before marking the memory as R+X, technically we should be able to do it after
+            // but there are some CPU's that have had errata about doing this with read only memory.
+            icache_coherence::clear_cache(text.as_ptr().cast(), text.len())
+                .expect("Failed cache clear");
+
+            // Switch the executable portion from readonly to read/execute.
+            self.memory
+                .mmap
+                .make_executable(self.text.clone(), self.enable_branch_protection)
+                .context("unable to make memory executable")?;
+
+            // Flush any in-flight instructions from the pipeline
+            icache_coherence::pipeline_flush_mt().expect("Failed pipeline flush");
+
+            // With all our memory set up use the platform-specific
+            // `UnwindRegistration` implementation to inform the general
+            // runtime that there's unwinding information available for all
+            // our just-published JIT functions.
+            self.register_unwind_info()?;
+        }
+
+        Ok(())
+    }
+}
+
+/// A compiled wasm module, ready to be instantiated.
+pub struct CompiledModule {
+    module: Arc<Module>,
+    funcs: PrimaryMap<DefinedFuncIndex, CompiledFunctionInfo>,
+    wasm_to_native_trampolines: Vec<(SignatureIndex, FunctionLoc)>,
+    meta: Metadata,
+    code_memory: Arc<CodeMemory>,
+    dbg_jit_registration: Option<GdbJitImageRegistration>,
+    /// A unique ID used to register this module with the engine.
+    unique_id: CompiledModuleId,
+    func_names: Vec<FunctionName>,
+}
+
+impl CompiledModule {
+    /// Creates `CompiledModule` directly from a precompiled artifact.
+    ///
+    /// The `code_memory` argument is expected to be the result of a previous
+    /// call to `ObjectBuilder::finish` above. This is an ELF image, at this
+    /// time, which contains all necessary information to create a
+    /// `CompiledModule` from a compilation.
+    ///
+    /// This method also takes `info`, an optionally-provided deserialization
+    /// of the artifacts' compilation metadata section. If this information is
+    /// not provided then the information will be
+    /// deserialized from the image of the compilation artifacts. Otherwise it
+    /// will be assumed to be what would otherwise happen if the section were
+    /// to be deserialized.
+    ///
+    /// The `profiler` argument here is used to inform JIT profiling runtimes
+    /// about new code that is loaded.
+    pub fn from_artifacts(
+        code_memory: Arc<CodeMemory>,
+        info: CompiledModuleInfo,
+        profiler: &dyn ProfilingAgent,
+        id_allocator: &CompiledModuleIdAllocator,
+    ) -> Result<Self> {
+        let mut ret = Self {
+            module: Arc::new(info.module),
+            funcs: info.funcs,
+            wasm_to_native_trampolines: info.wasm_to_native_trampolines,
+            dbg_jit_registration: None,
+            code_memory,
+            meta: info.meta,
+            unique_id: id_allocator.alloc(),
+            func_names: info.func_names,
+        };
+        ret.register_debug_and_profiling(profiler)?;
+
+        Ok(ret)
+    }
+
+    fn register_debug_and_profiling(&mut self, profiler: &dyn ProfilingAgent) -> Result<()> {
+        if self.meta.native_debug_info_present {
+            let text = self.text();
+            let bytes = create_gdbjit_image(self.mmap().to_vec(), (text.as_ptr(), text.len()))
+                .context("failed to create jit image for gdb")?;
+            let reg = GdbJitImageRegistration::register(bytes);
+            self.dbg_jit_registration = Some(reg);
+        }
+        profiler.register_module(&self.code_memory, &|addr| {
+            let (idx, _) = self.func_by_text_offset(addr)?;
+            let idx = self.module.func_index(idx);
+            let name = self.func_name(idx)?;
+            let mut demangled = String::new();
+            crate::demangling::demangle_function_name(&mut demangled, name).unwrap();
+            Some(demangled)
+        });
+        Ok(())
+    }
+
+    /// Get this module's unique ID. It is unique with respect to a
+    /// single allocator (which is ordinarily held on a Wasm engine).
+    pub fn unique_id(&self) -> CompiledModuleId {
+        self.unique_id
+    }
+
+    /// Returns the underlying memory which contains the compiled module's
+    /// image.
+    pub fn mmap(&self) -> &MmapVec {
+        self.code_memory.mmap()
+    }
+
+    /// Returns the underlying owned mmap of this compiled image.
+    pub fn code_memory(&self) -> &Arc<CodeMemory> {
+        &self.code_memory
+    }
+
+    /// Returns the text section of the ELF image for this compiled module.
+    ///
+    /// This memory should have the read/execute permissions.
+    #[inline]
+    pub fn text(&self) -> &[u8] {
+        self.code_memory.text()
+    }
+
+    /// Return a reference-counting pointer to a module.
+    pub fn module(&self) -> &Arc<Module> {
+        &self.module
+    }
+
+    /// Looks up the `name` section name for the function index `idx`, if one
+    /// was specified in the original wasm module.
+    pub fn func_name(&self, idx: FuncIndex) -> Option<&str> {
+        // Find entry for `idx`, if present.
+        let i = self.func_names.binary_search_by_key(&idx, |n| n.idx).ok()?;
+        let name = &self.func_names[i];
+
+        // Here we `unwrap` the `from_utf8` but this can theoretically be a
+        // `from_utf8_unchecked` if we really wanted since this section is
+        // guaranteed to only have valid utf-8 data. Until it's a problem it's
+        // probably best to double-check this though.
+        let data = self.code_memory().func_name_data();
+        Some(str::from_utf8(&data[name.offset as usize..][..name.len as usize]).unwrap())
+    }
+
+    /// Return a reference to a mutable module (if possible).
+    pub fn module_mut(&mut self) -> Option<&mut Module> {
+        Arc::get_mut(&mut self.module)
+    }
+
+    /// Returns an iterator over all functions defined within this module with
+    /// their index and their body in memory.
+    #[inline]
+    pub fn finished_functions(
+        &self,
+    ) -> impl ExactSizeIterator<Item = (DefinedFuncIndex, &[u8])> + '_ {
+        self.funcs
+            .iter()
+            .map(move |(i, _)| (i, self.finished_function(i)))
+    }
+
+    /// Returns the body of the function that `index` points to.
+    #[inline]
+    pub fn finished_function(&self, index: DefinedFuncIndex) -> &[u8] {
+        let loc = self.funcs[index].wasm_func_loc;
+        &self.text()[loc.start as usize..][..loc.length as usize]
+    }
+
+    /// Get the array-to-Wasm trampoline for the function `index` points to.
+    ///
+    /// If the function `index` points to does not escape, then `None` is
+    /// returned.
+    ///
+    /// These trampolines are used for array callers (e.g. `Func::new`)
+    /// calling Wasm callees.
+    pub fn array_to_wasm_trampoline(&self, index: DefinedFuncIndex) -> Option<&[u8]> {
+        let loc = self.funcs[index].array_to_wasm_trampoline?;
+        Some(&self.text()[loc.start as usize..][..loc.length as usize])
+    }
+
+    /// Get the native-to-Wasm trampoline for the function `index` points to.
+    ///
+    /// If the function `index` points to does not escape, then `None` is
+    /// returned.
+    ///
+    /// These trampolines are used for native callers (e.g. `Func::wrap`)
+    /// calling Wasm callees.
+    #[inline]
+    pub fn native_to_wasm_trampoline(&self, index: DefinedFuncIndex) -> Option<&[u8]> {
+        let loc = self.funcs[index].native_to_wasm_trampoline?;
+        Some(&self.text()[loc.start as usize..][..loc.length as usize])
+    }
+
+    /// Get the Wasm-to-native trampoline for the given signature.
+    ///
+    /// These trampolines are used for filling in
+    /// `VMFuncRef::wasm_call` for `Func::wrap`-style host funcrefs
+    /// that don't have access to a compiler when created.
+    pub fn wasm_to_native_trampoline(&self, signature: SignatureIndex) -> &[u8] {
+        let idx = self
+            .wasm_to_native_trampolines
+            .binary_search_by_key(&signature, |entry| entry.0)
+            .expect("should have a Wasm-to-native trampline for all signatures");
+        let (_, loc) = self.wasm_to_native_trampolines[idx];
+        &self.text()[loc.start as usize..][..loc.length as usize]
+    }
+
+    /// Returns the stack map information for all functions defined in this
+    /// module.
+    ///
+    /// The iterator returned iterates over the span of the compiled function in
+    /// memory with the stack maps associated with those bytes.
+    pub fn stack_maps(&self) -> impl Iterator<Item = (&[u8], &[StackMapInformation])> {
+        self.finished_functions().map(|(_, f)| f).zip(
+            self.funcs
+                .values()
+                .map(|f| &f.wasm_func_info.stack_maps[..]),
+        )
+    }
+
+    /// Lookups a defined function by a program counter value.
+    ///
+    /// Returns the defined function index and the relative address of
+    /// `text_offset` within the function itself.
+    pub fn func_by_text_offset(&self, text_offset: usize) -> Option<(DefinedFuncIndex, u32)> {
+        let text_offset = u32::try_from(text_offset).unwrap();
+
+        let index = match self.funcs.binary_search_values_by_key(&text_offset, |e| {
+            debug_assert!(e.wasm_func_loc.length > 0);
+            // Return the inclusive "end" of the function
+            e.wasm_func_loc.start + e.wasm_func_loc.length - 1
+        }) {
+            Ok(k) => {
+                // Exact match, pc is at the end of this function
+                k
+            }
+            Err(k) => {
+                // Not an exact match, k is where `pc` would be "inserted"
+                // Since we key based on the end, function `k` might contain `pc`,
+                // so we'll validate on the range check below
+                k
+            }
+        };
+
+        let CompiledFunctionInfo { wasm_func_loc, .. } = self.funcs.get(index)?;
+        let start = wasm_func_loc.start;
+        let end = wasm_func_loc.start + wasm_func_loc.length;
+
+        if text_offset < start || end < text_offset {
+            return None;
+        }
+
+        Some((index, text_offset - wasm_func_loc.start))
+    }
+
+    /// Gets the function location information for a given function index.
+    pub fn func_loc(&self, index: DefinedFuncIndex) -> &FunctionLoc {
+        &self
+            .funcs
+            .get(index)
+            .expect("defined function should be present")
+            .wasm_func_loc
+    }
+
+    /// Gets the function information for a given function index.
+    pub fn wasm_func_info(&self, index: DefinedFuncIndex) -> &WasmFunctionInfo {
+        &self
+            .funcs
+            .get(index)
+            .expect("defined function should be present")
+            .wasm_func_info
+    }
+
+    /// Creates a new symbolication context which can be used to further
+    /// symbolicate stack traces.
+    ///
+    /// Basically this makes a thing which parses debuginfo and can tell you
+    /// what filename and line number a wasm pc comes from.
+    #[cfg(feature = "addr2line")]
+    pub fn symbolize_context(&self) -> Result<Option<SymbolizeContext<'_>>> {
+        use gimli::EndianSlice;
+        if !self.meta.has_wasm_debuginfo {
+            return Ok(None);
+        }
+        let dwarf = gimli::Dwarf::load(|id| -> Result<_> {
+            // Lookup the `id` in the `dwarf` array prepared for this module
+            // during module serialization where it's sorted by the `id` key. If
+            // found this is a range within the general module's concatenated
+            // dwarf section which is extracted here, otherwise it's just an
+            // empty list to represent that it's not present.
+            let data = self
+                .meta
+                .dwarf
+                .binary_search_by_key(&(id as u8), |(id, _)| *id)
+                .map(|i| {
+                    let (_, range) = &self.meta.dwarf[i];
+                    &self.code_memory().dwarf()[range.start as usize..range.end as usize]
+                })
+                .unwrap_or(&[]);
+            Ok(EndianSlice::new(data, gimli::LittleEndian))
+        })?;
+        let cx = addr2line::Context::from_dwarf(dwarf)
+            .context("failed to create addr2line dwarf mapping context")?;
+        Ok(Some(SymbolizeContext {
+            inner: cx,
+            code_section_offset: self.meta.code_section_offset,
+        }))
+    }
+
+    /// Returns whether the original wasm module had unparsed debug information
+    /// based on the tunables configuration.
+    pub fn has_unparsed_debuginfo(&self) -> bool {
+        self.meta.has_unparsed_debuginfo
+    }
+
+    /// Indicates whether this module came with n address map such that lookups
+    /// via `wasmtime_environ::lookup_file_pos` will succeed.
+    ///
+    /// If this function returns `false` then `lookup_file_pos` will always
+    /// return `None`.
+    pub fn has_address_map(&self) -> bool {
+        !self.code_memory.address_map_data().is_empty()
+    }
+
+    /// Returns the bounds, in host memory, of where this module's compiled
+    /// image resides.
+    pub fn image_range(&self) -> Range<usize> {
+        let base = self.mmap().as_ptr() as usize;
+        let len = self.mmap().len();
+        base..base + len
+    }
+}
+
+#[cfg(feature = "addr2line")]
+type Addr2LineContext<'a> = addr2line::Context<gimli::EndianSlice<'a, gimli::LittleEndian>>;
+
+/// A context which contains dwarf debug information to translate program
+/// counters back to filenames and line numbers.
+#[cfg(feature = "addr2line")]
+pub struct SymbolizeContext<'a> {
+    inner: Addr2LineContext<'a>,
+    code_section_offset: u64,
+}
+
+#[cfg(feature = "addr2line")]
+impl<'a> SymbolizeContext<'a> {
+    /// Returns access to the [`addr2line::Context`] which can be used to query
+    /// frame information with.
+    pub fn addr2line(&self) -> &Addr2LineContext<'a> {
+        &self.inner
+    }
+
+    /// Returns the offset of the code section in the original wasm file, used
+    /// to calculate lookup values into the DWARF.
+    pub fn code_section_offset(&self) -> u64 {
+        self.code_section_offset
+    }
+}
 #[cfg(test)]
 mod tests {
     use std::{
