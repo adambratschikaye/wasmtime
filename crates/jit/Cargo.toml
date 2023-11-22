@@ -13,9 +13,8 @@ edition.workspace = true
 [dependencies]
 wasmtime-environ = { workspace = true }
 wasmtime-jit-debug = { workspace = true, features = [
-  "perf_jitdump",
+	"perf_jitdump",
 ], optional = true }
-wasmtime-runtime = { workspace = true }
 target-lexicon = { workspace = true }
 anyhow = { workspace = true }
 cfg-if = { workspace = true }
