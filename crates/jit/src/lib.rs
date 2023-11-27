@@ -10,6 +10,7 @@ mod instantiate;
 // pub mod profiling;
 
 pub use crate::code_memory::CodeMemory;
+pub use crate::code_memory::LibCalls;
 pub use crate::instantiate::{
     subslice_range, CompiledFunctionInfo, CompiledModuleInfo, ObjectBuilder,
 };

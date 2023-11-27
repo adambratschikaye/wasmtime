@@ -1,30 +1,37 @@
+use crate::profiling::ProfilingAgent;
 use crate::signatures::SignatureRegistry;
-use crate::Config;
+use crate::unwind::UnwindRegistration;
+use crate::{Config, Module};
 use anyhow::{Context, Result};
 use object::write::{Object, StandardSegment};
 use object::SectionKind;
 use once_cell::sync::OnceCell;
 #[cfg(feature = "parallel-compilation")]
 use rayon::prelude::*;
+use std::mem::ManuallyDrop;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 #[cfg(feature = "cache")]
 use wasmtime_cache::CacheConfig;
-use wasmtime_environ::obj;
+use wasmtime_environ::{
+    obj, DefinedFuncIndex, FuncIndex, FunctionLoc, PrimaryMap, SignatureIndex, StackMapInformation,
+    WasmFunctionInfo,
+};
 use wasmtime_environ::{FlagValue, ObjectKind};
-use wasmtime_jit::{code_memory::LibCalls, profiling::ProfilingAgent, CodeMemory};
+use wasmtime_jit::{CodeMemory, CompiledFunctionInfo, CompiledModuleInfo, LibCalls};
 use wasmtime_runtime::{libcalls::relocs, CompiledModuleIdAllocator, InstanceAllocator, MmapVec};
+use wasmtime_runtime::{CompiledModuleId, GdbJitImageRegistration};
 
 mod serialization;
 
 pub(crate) const LIBCALLS: LibCalls = LibCalls {
     floorf32: relocs::floorf32 as usize,
-    floorf64: relocs::floor64 as usize,
+    floorf64: relocs::floorf64 as usize,
     nearestf32: relocs::nearestf32 as usize,
     nearestf64: relocs::nearestf64 as usize,
     ceilf32: relocs::ceilf32 as usize,
-    ceilf64: relocs::ceilf54 as usize,
+    ceilf64: relocs::ceilf64 as usize,
     truncf32: relocs::truncf32 as usize,
     truncf64: relocs::truncf64 as usize,
     fmaf32: relocs::fmaf32 as usize,
@@ -853,7 +860,7 @@ impl CompiledModule {
             let idx = self.module.func_index(idx);
             let name = self.func_name(idx)?;
             let mut demangled = String::new();
-            crate::demangling::demangle_function_name(&mut demangled, name).unwrap();
+            wasmtime_jit::demangle_function_name(&mut demangled, name).unwrap();
             Some(demangled)
         });
         Ok(())

@@ -7,18 +7,30 @@ use object::ObjectSymbol;
 use std::ops::{Deref, DerefMut, Range};
 use wasmtime_environ::obj;
 
+/// TODO: doc
 pub struct LibCalls {
+    /// TODO: doc
     pub floorf32: usize,
+    /// TODO: doc
     pub floorf64: usize,
+    /// TODO: doc
     pub nearestf32: usize,
+    /// TODO: doc
     pub nearestf64: usize,
+    /// TODO: doc
     pub ceilf32: usize,
+    /// TODO: doc
     pub ceilf64: usize,
+    /// TODO: doc
     pub truncf32: usize,
+    /// TODO: doc
     pub truncf64: usize,
+    /// TODO: doc
     pub fmaf32: usize,
+    /// TODO: doc
     pub fmaf64: usize,
     #[cfg(target_arch = "x86_64")]
+    /// TODO: doc
     pub x86_pshufb: usize,
 }
 

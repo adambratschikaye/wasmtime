@@ -1,3 +1,4 @@
+use crate::engine::CompiledModule;
 use crate::{
     code::CodeObject,
     resources::ResourcesRequired,
@@ -18,7 +19,7 @@ use wasmtime_environ::{
     DefinedFuncIndex, DefinedMemoryIndex, HostPtr, ModuleEnvironment, ModuleTypes, ObjectKind,
     VMOffsets,
 };
-use wasmtime_jit::{CodeMemory, CompiledModule, CompiledModuleInfo};
+use wasmtime_jit::{CodeMemory, CompiledModuleInfo};
 use wasmtime_runtime::{
     CompiledModuleId, MemoryImage, MmapVec, ModuleMemoryImages, VMArrayCallFunction,
     VMNativeCallFunction, VMSharedSignatureIndex, VMWasmCallFunction,
