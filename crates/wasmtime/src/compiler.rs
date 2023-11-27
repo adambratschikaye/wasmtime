@@ -30,7 +30,7 @@ use wasmtime_environ::{
     Compiler, DefinedFuncIndex, FuncIndex, FunctionBodyData, ModuleTranslation, ModuleType,
     ModuleTypes, PrimaryMap, SignatureIndex, StaticModuleIndex, WasmFunctionInfo,
 };
-use wasmtime_jit::{CompiledFunctionInfo, CompiledModuleInfo};
+use wasmtime_jit_runtime::{CompiledFunctionInfo, CompiledModuleInfo};
 
 type CompileInput<'a> = Box<dyn FnOnce(&dyn Compiler) -> Result<CompileOutput> + Send + 'a>;
 
@@ -450,7 +450,7 @@ impl FunctionIndices {
         engine: &'a Engine,
         compiled_funcs: Vec<(String, Box<dyn Any + Send>)>,
         translations: PrimaryMap<StaticModuleIndex, ModuleTranslation<'_>>,
-    ) -> Result<(wasmtime_jit::ObjectBuilder<'a>, Artifacts)> {
+    ) -> Result<(wasmtime_jit_runtime::ObjectBuilder<'a>, Artifacts)> {
         // Append all the functions to the ELF file.
         //
         // The result is a vector parallel to `compiled_funcs` where
@@ -510,7 +510,7 @@ impl FunctionIndices {
             }
         }
 
-        let mut obj = wasmtime_jit::ObjectBuilder::new(obj, tunables);
+        let mut obj = wasmtime_jit_runtime::ObjectBuilder::new(obj, tunables);
         let mut artifacts = Artifacts::default();
 
         // Finally, build our binary artifacts that map things like `FuncIndex`

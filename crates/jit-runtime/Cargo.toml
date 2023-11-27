@@ -44,3 +44,4 @@ ittapi = { version = "0.4.0", optional = true }
 [features]
 profiling = ['dep:wasmtime-jit-debug', 'dep:ittapi']
 demangle = ['dep:rustc-demangle', 'dep:cpp_demangle']
+addr2line = ['dep:addr2line', 'wasmtime-jit/addr2line']

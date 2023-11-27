@@ -8,7 +8,7 @@ use fxprof_processed_profile::{
 use std::ops::Range;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use wasmtime_jit::CompiledModule;
+use wasmtime_jit_runtime::CompiledModule;
 use wasmtime_runtime::Backtrace;
 
 // TODO: collect more data

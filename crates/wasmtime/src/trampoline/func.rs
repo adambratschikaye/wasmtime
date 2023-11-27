@@ -4,7 +4,7 @@ use crate::{Engine, FuncType, ValRaw};
 use anyhow::Result;
 use std::panic::{self, AssertUnwindSafe};
 use std::ptr::NonNull;
-use wasmtime_jit::CodeMemory;
+use wasmtime_jit_runtime::CodeMemory;
 use wasmtime_runtime::{
     StoreBox, VMArrayCallHostFuncContext, VMContext, VMFuncRef, VMOpaqueContext,
 };
@@ -94,7 +94,7 @@ where
             &mut obj,
         )?;
     engine.append_bti(&mut obj);
-    let obj = wasmtime_jit::ObjectBuilder::new(obj, &engine.config().tunables).finish()?;
+    let obj = wasmtime_jit_runtime::ObjectBuilder::new(obj, &engine.config().tunables).finish()?;
 
     // Copy the results of JIT compilation into executable memory, and this will
     // also take care of unwind table registration.

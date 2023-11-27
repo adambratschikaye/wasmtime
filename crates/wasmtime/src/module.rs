@@ -18,7 +18,7 @@ use wasmtime_environ::{
     DefinedFuncIndex, DefinedMemoryIndex, HostPtr, ModuleEnvironment, ModuleTypes, ObjectKind,
     VMOffsets,
 };
-use wasmtime_jit::{CodeMemory, CompiledModule, CompiledModuleInfo};
+use wasmtime_jit_runtime::{CodeMemory, CompiledModule, CompiledModuleInfo};
 use wasmtime_runtime::{
     CompiledModuleId, MemoryImage, MmapVec, ModuleMemoryImages, VMArrayCallFunction,
     VMNativeCallFunction, VMSharedSignatureIndex, VMWasmCallFunction,

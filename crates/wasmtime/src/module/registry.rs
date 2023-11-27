@@ -11,7 +11,7 @@ use std::{
     ptr::NonNull,
     sync::{Arc, RwLock},
 };
-use wasmtime_jit::CodeMemory;
+use wasmtime_jit_runtime::CodeMemory;
 use wasmtime_runtime::{ModuleInfo, VMSharedSignatureIndex, VMWasmCallFunction};
 
 /// Used for registering modules with a store.

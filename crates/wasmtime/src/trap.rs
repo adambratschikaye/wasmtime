@@ -5,7 +5,7 @@ use crate::{AsContext, Module};
 use anyhow::Error;
 use std::fmt;
 use wasmtime_environ::{EntityRef, FilePos};
-use wasmtime_jit::{demangle_function_name, demangle_function_name_or_index};
+use wasmtime_jit_runtime::{demangle_function_name, demangle_function_name_or_index};
 
 /// Representation of a WebAssembly trap and what caused it to occur.
 ///

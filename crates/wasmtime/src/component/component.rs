@@ -13,7 +13,7 @@ use wasmtime_environ::component::{
     TrampolineIndex, Translator, VMComponentOffsets,
 };
 use wasmtime_environ::{FunctionLoc, HostPtr, ObjectKind, PrimaryMap, ScopeVec};
-use wasmtime_jit::{CodeMemory, CompiledModuleInfo};
+use wasmtime_jit_runtime::{CodeMemory, CompiledModuleInfo};
 use wasmtime_runtime::component::ComponentRuntimeInfo;
 use wasmtime_runtime::{
     MmapVec, VMArrayCallFunction, VMFuncRef, VMFunctionBody, VMNativeCallFunction,

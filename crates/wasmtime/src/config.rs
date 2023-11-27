@@ -13,7 +13,7 @@ use wasmparser::WasmFeatures;
 #[cfg(feature = "cache")]
 use wasmtime_cache::CacheConfig;
 use wasmtime_environ::Tunables;
-use wasmtime_jit::profiling::{self, ProfilingAgent};
+use wasmtime_jit_runtime::profiling::{self, ProfilingAgent};
 use wasmtime_runtime::{mpk, InstanceAllocator, OnDemandInstanceAllocator, RuntimeMemoryCreator};
 
 #[cfg(feature = "async")]
