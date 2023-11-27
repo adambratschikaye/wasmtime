@@ -3247,6 +3247,7 @@ dependencies = [
  "wasm-encoder",
  "wasmparser",
  "wasmtime-cache",
+ "wasmtime-compile",
  "wasmtime-component-macro",
  "wasmtime-component-util",
  "wasmtime-cranelift",
@@ -3405,6 +3406,17 @@ dependencies = [
  "rayon",
  "tracing-subscriber",
  "wasmtime",
+]
+
+[[package]]
+name = "wasmtime-compile"
+version = "15.0.0"
+dependencies = [
+ "anyhow",
+ "object",
+ "target-lexicon",
+ "wasmtime-environ",
+ "wasmtime-jit",
 ]
 
 [[package]]

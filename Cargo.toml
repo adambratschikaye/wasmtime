@@ -146,6 +146,7 @@ wasmtime-wmemcheck = { path = "crates/wmemcheck", version = "=15.0.0" }
 wasmtime = { path = "crates/wasmtime", version = "15.0.0", default-features = false }
 wasmtime-cache = { path = "crates/cache", version = "=15.0.0" }
 wasmtime-cli-flags = { path = "crates/cli-flags", version = "=15.0.0" }
+wasmtime-compile = { path = "crates/compile", version = "=15.0.0" }
 wasmtime-cranelift = { path = "crates/cranelift", version = "=15.0.0" }
 wasmtime-cranelift-shared = { path = "crates/cranelift-shared", version = "=15.0.0" }
 wasmtime-winch = { path = "crates/winch", version = "=15.0.0" }
