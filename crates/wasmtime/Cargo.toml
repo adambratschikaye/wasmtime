@@ -134,6 +134,7 @@ component-model = [
   "wasmtime-cranelift?/component-model",
   "wasmtime-winch?/component-model",
   "wasmtime-runtime/component-model",
+  "wasmtime-compile/component-model",
   "dep:wasmtime-component-macro",
   "dep:wasmtime-component-util",
   "dep:encoding_rs",

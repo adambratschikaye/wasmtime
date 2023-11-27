@@ -407,8 +407,8 @@
 #[macro_use]
 mod func;
 
-#[cfg(any(feature = "cranelift", feature = "winch"))]
-mod compiler;
+// #[cfg(any(feature = "cranelift", feature = "winch"))]
+// mod compiler;
 
 mod code;
 mod config;
@@ -474,6 +474,8 @@ pub use anyhow::{Error, Result};
 
 #[cfg(feature = "component-model")]
 pub mod component;
+
+pub use wasmtime_compile::Strategy;
 
 cfg_if::cfg_if! {
     if #[cfg(unix)] {

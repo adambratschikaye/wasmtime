@@ -59,3 +59,12 @@ cranelift = ["dep:wasmtime-cranelift"]
 # strategy in `Config` will be available. It is currently in active development
 # and shouldn't be used in production applications.
 winch = ["dep:wasmtime-winch"]
+
+# Enables in-progress support for the component model. Note that this feature is
+# in-progress, buggy, and incomplete. This is primarily here for internal
+# testing purposes.
+component-model = [
+	"wasmtime-environ/component-model",
+	"wasmtime-cranelift?/component-model",
+	"wasmtime-winch?/component-model",
+]

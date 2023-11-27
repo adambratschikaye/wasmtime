@@ -404,9 +404,8 @@ impl Module {
         engine: &Engine,
         wasm: &[u8],
     ) -> Result<(MmapVec, Option<(CompiledModuleInfo, ModuleTypes)>)> {
+        use wasmtime_compile::CompileInputs;
         use wasmtime_jit_runtime::mmap_instantiate::finish_object;
-
-        use crate::compiler::CompileInputs;
 
         let tunables = &engine.config().tunables;
 
@@ -425,7 +424,7 @@ impl Module {
         let types = types.finish();
 
         let compile_inputs = CompileInputs::for_module(&types, &translation, functions);
-        let unlinked_compile_outputs = compile_inputs.compile(engine)?;
+        let unlinked_compile_outputs = compile_inputs.compile(engine.compiler())?;
         let (compiled_funcs, function_indices) = unlinked_compile_outputs.pre_link();
 
         // Emplace all compiled functions into the object file with any other
@@ -445,7 +444,13 @@ impl Module {
 
         let (mut object, compilation_artifacts) = function_indices.link_and_append_code(
             object,
-            engine,
+            engine.compiler(),
+            &engine.config().tunables,
+            if engine.config().memory_init_cow {
+                Some(engine.config().memory_guaranteed_dense_image_size)
+            } else {
+                None
+            },
             compiled_funcs,
             std::iter::once(translation).collect(),
         )?;

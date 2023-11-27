@@ -177,9 +177,8 @@ impl Component {
         engine: &Engine,
         binary: &[u8],
     ) -> Result<(MmapVec, ComponentArtifacts)> {
+        use wasmtime_compile::CompileInputs;
         use wasmtime_jit_runtime::mmap_instantiate::finish_object;
-
-        use crate::compiler::CompileInputs;
 
         let tunables = &engine.config().tunables;
         let compiler = engine.compiler();
@@ -202,7 +201,7 @@ impl Component {
                 (i, &*translation, functions)
             }),
         );
-        let unlinked_compile_outputs = compile_inputs.compile(&engine)?;
+        let unlinked_compile_outputs = compile_inputs.compile(engine.compiler())?;
         let (compiled_funcs, function_indices) = unlinked_compile_outputs.pre_link();
 
         let mut object = compiler.object(ObjectKind::Component)?;
@@ -211,7 +210,13 @@ impl Component {
 
         let (mut object, compilation_artifacts) = function_indices.link_and_append_code(
             object,
-            engine,
+            engine.compiler(),
+            &engine.config().tunables,
+            if engine.config().memory_init_cow {
+                Some(engine.config().memory_guaranteed_dense_image_size)
+            } else {
+                None
+            },
             compiled_funcs,
             module_translations,
         )?;
