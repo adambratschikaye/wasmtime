@@ -3252,7 +3252,7 @@ dependencies = [
  "wasmtime-cranelift",
  "wasmtime-environ",
  "wasmtime-fiber",
- "wasmtime-jit",
+ "wasmtime-jit-runtime",
  "wasmtime-runtime",
  "wasmtime-wasi",
  "wasmtime-winch",
@@ -3626,6 +3626,32 @@ version = "15.0.0"
 dependencies = [
  "cfg-if",
  "libc",
+ "windows-sys",
+]
+
+[[package]]
+name = "wasmtime-jit-runtime"
+version = "15.0.0"
+dependencies = [
+ "addr2line",
+ "anyhow",
+ "bincode",
+ "cfg-if",
+ "cpp_demangle",
+ "gimli",
+ "ittapi",
+ "log",
+ "object",
+ "rustc-demangle",
+ "rustix",
+ "serde",
+ "serde_derive",
+ "target-lexicon",
+ "wasmtime-environ",
+ "wasmtime-jit",
+ "wasmtime-jit-debug",
+ "wasmtime-jit-icache-coherence",
+ "wasmtime-runtime",
  "windows-sys",
 ]
 
