@@ -1,17 +1,16 @@
 use crate::memory::MemoryCreator;
 use crate::trampoline::MemoryCreatorProxy;
-use anyhow::{bail, ensure, Result};
+use anyhow::{bail, Result};
 use serde_derive::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
 use std::fmt;
 #[cfg(any(feature = "cache", feature = "cranelift", feature = "winch"))]
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
-use target_lexicon::Architecture;
 use wasmparser::WasmFeatures;
 #[cfg(feature = "cache")]
 use wasmtime_cache::CacheConfig;
+use wasmtime_compile::CompilerConfig;
 use wasmtime_environ::Tunables;
 use wasmtime_jit_runtime::profiling::{self, ProfilingAgent};
 use wasmtime_runtime::{mpk, InstanceAllocator, OnDemandInstanceAllocator, RuntimeMemoryCreator};
@@ -121,61 +120,6 @@ pub struct Config {
     pub(crate) wmemcheck: bool,
     pub(crate) coredump_on_trap: bool,
     pub(crate) macos_use_mach_ports: bool,
-}
-
-/// User-provided configuration for the compiler.
-#[cfg(any(feature = "cranelift", feature = "winch"))]
-#[derive(Debug, Clone)]
-struct CompilerConfig {
-    strategy: Strategy,
-    target: Option<target_lexicon::Triple>,
-    settings: HashMap<String, String>,
-    flags: HashSet<String>,
-    #[cfg(any(feature = "cranelift", feature = "winch"))]
-    cache_store: Option<Arc<dyn CacheStore>>,
-    clif_dir: Option<std::path::PathBuf>,
-    wmemcheck: bool,
-}
-
-#[cfg(any(feature = "cranelift", feature = "winch"))]
-impl CompilerConfig {
-    fn new(strategy: Strategy) -> Self {
-        Self {
-            strategy,
-            target: None,
-            settings: HashMap::new(),
-            flags: HashSet::new(),
-            cache_store: None,
-            clif_dir: None,
-            wmemcheck: false,
-        }
-    }
-
-    /// Ensures that the key is not set or equals to the given value.
-    /// If the key is not set, it will be set to the given value.
-    ///
-    /// # Returns
-    ///
-    /// Returns true if successfully set or already had the given setting
-    /// value, or false if the setting was explicitly set to something
-    /// else previously.
-    fn ensure_setting_unset_or_given(&mut self, k: &str, v: &str) -> bool {
-        if let Some(value) = self.settings.get(k) {
-            if value != v {
-                return false;
-            }
-        } else {
-            self.settings.insert(k.to_string(), v.to_string());
-        }
-        true
-    }
-}
-
-#[cfg(any(feature = "cranelift", feature = "winch"))]
-impl Default for CompilerConfig {
-    fn default() -> Self {
-        Self::new(Strategy::Auto)
-    }
 }
 
 impl Config {
@@ -873,7 +817,7 @@ impl Config {
     /// The default value for this is `Strategy::Auto`.
     #[cfg(any(feature = "cranelift", feature = "winch"))]
     #[cfg_attr(nightlydoc, doc(cfg(any(feature = "cranelift", feature = "winch"))))]
-    pub fn strategy(&mut self, strategy: Strategy) -> &mut Self {
+    pub fn strategy(&mut self, strategy: wasmtime_compile::Strategy) -> &mut Self {
         self.compiler_config.strategy = strategy;
         self
     }
@@ -1644,118 +1588,14 @@ impl Config {
 
     #[cfg(any(feature = "cranelift", feature = "winch"))]
     pub(crate) fn build_compiler(mut self) -> Result<(Self, Box<dyn wasmtime_environ::Compiler>)> {
-        let mut compiler = match self.compiler_config.strategy {
-            #[cfg(feature = "cranelift")]
-            Strategy::Auto => wasmtime_cranelift::builder(),
-            #[cfg(all(feature = "winch", not(feature = "cranelift")))]
-            Strategy::Auto => wasmtime_winch::builder(),
-            #[cfg(feature = "cranelift")]
-            Strategy::Cranelift => wasmtime_cranelift::builder(),
-            #[cfg(not(feature = "cranelift"))]
-            Strategy::Cranelift => bail!("cranelift support not compiled in"),
-            #[cfg(feature = "winch")]
-            Strategy::Winch => wasmtime_winch::builder(),
-            #[cfg(not(feature = "winch"))]
-            Strategy::Winch => bail!("winch support not compiled in"),
-        };
-
-        if let Some(target) = &self.compiler_config.target {
-            compiler.target(target.clone())?;
-        }
-
-        if let Some(path) = &self.compiler_config.clif_dir {
-            compiler.clif_dir(path)?;
-        }
-
-        // If probestack is enabled for a target, Wasmtime will always use the
-        // inline strategy which doesn't require us to define a `__probestack`
-        // function or similar.
-        self.compiler_config
-            .settings
-            .insert("probestack_strategy".into(), "inline".into());
-
-        let host = target_lexicon::Triple::host();
-        let target = self
-            .compiler_config
-            .target
-            .as_ref()
-            .unwrap_or(&host)
-            .clone();
-
-        // On supported targets, we enable stack probing by default.
-        // This is required on Windows because of the way Windows
-        // commits its stacks, but it's also a good idea on other
-        // platforms to ensure guard pages are hit for large frame
-        // sizes.
-        if probestack_supported(target.architecture) {
-            self.compiler_config
-                .flags
-                .insert("enable_probestack".into());
-        }
-
-        if self.features.tail_call {
-            ensure!(
-                target.architecture != Architecture::S390x,
-                "Tail calls are not supported on s390x yet: \
-                 https://github.com/bytecodealliance/wasmtime/issues/6530"
-            );
-        }
-
-        if let Some(unwind_requested) = self.native_unwind_info {
-            if !self
-                .compiler_config
-                .ensure_setting_unset_or_given("unwind_info", &unwind_requested.to_string())
-            {
-                bail!("incompatible settings requested for Cranelift and Wasmtime `unwind-info` settings");
-            }
-        }
-
-        if target.operating_system == target_lexicon::OperatingSystem::Windows {
-            if !self
-                .compiler_config
-                .ensure_setting_unset_or_given("unwind_info", "true")
-            {
-                bail!("`native_unwind_info` cannot be disabled on Windows");
-            }
-        }
-
-        // We require frame pointers for correct stack walking, which is safety
-        // critical in the presence of reference types, and otherwise it is just
-        // really bad developer experience to get wrong.
-        self.compiler_config
-            .settings
-            .insert("preserve_frame_pointers".into(), "true".into());
-
-        // check for incompatible compiler options and set required values
-        if self.features.reference_types {
-            if !self
-                .compiler_config
-                .ensure_setting_unset_or_given("enable_safepoints", "true")
-            {
-                bail!("compiler option 'enable_safepoints' must be enabled when 'reference types' is enabled");
-            }
-        }
-
-        if self.features.relaxed_simd && !self.features.simd {
-            bail!("cannot disable the simd proposal but enable the relaxed simd proposal");
-        }
-
-        // Apply compiler settings and flags
-        for (k, v) in self.compiler_config.settings.iter() {
-            compiler.set(k, v)?;
-        }
-        for flag in self.compiler_config.flags.iter() {
-            compiler.enable(flag)?;
-        }
-
-        if let Some(cache_store) = &self.compiler_config.cache_store {
-            compiler.enable_incremental_compilation(cache_store.clone())?;
-        }
-
-        compiler.set_tunables(self.tunables.clone())?;
-        compiler.wmemcheck(self.compiler_config.wmemcheck);
-
-        Ok((self, compiler.build()?))
+        let (compiler_config, compiler) = wasmtime_compile::build_compiler(
+            self.compiler_config,
+            &self.tunables,
+            self.features,
+            self.native_unwind_info,
+        )?;
+        self.compiler_config = compiler_config;
+        Ok((self, compiler))
     }
 
     /// Internal setting for whether adapter modules for components will have
@@ -1860,32 +1700,6 @@ impl fmt::Debug for Config {
         }
         f.finish()
     }
-}
-
-/// Possible Compilation strategies for a wasm module.
-///
-/// This is used as an argument to the [`Config::strategy`] method.
-#[non_exhaustive]
-#[derive(PartialEq, Eq, Clone, Debug, Copy)]
-pub enum Strategy {
-    /// An indicator that the compilation strategy should be automatically
-    /// selected.
-    ///
-    /// This is generally what you want for most projects and indicates that the
-    /// `wasmtime` crate itself should make the decision about what the best
-    /// code generator for a wasm module is.
-    ///
-    /// Currently this always defaults to Cranelift, but the default value may
-    /// change over time.
-    Auto,
-
-    /// Currently the default backend, Cranelift aims to be a reasonably fast
-    /// code generator which generates high quality machine code.
-    Cranelift,
-
-    /// A baseline compiler for WebAssembly, currently under active development and not ready for
-    /// production applications.
-    Winch,
 }
 
 /// Possible optimization levels for the Cranelift codegen backend.
@@ -2412,11 +2226,4 @@ impl PoolingAllocationConfig {
     pub fn are_memory_protection_keys_available(&self) -> bool {
         mpk::is_supported()
     }
-}
-
-pub(crate) fn probestack_supported(arch: Architecture) -> bool {
-    matches!(
-        arch,
-        Architecture::X86_64 | Architecture::Aarch64(_) | Architecture::Riscv64(_)
-    )
 }

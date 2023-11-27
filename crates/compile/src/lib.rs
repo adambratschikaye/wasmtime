@@ -22,14 +22,19 @@
 //!   functions. It is up to the caller to serialize the relevant parts of the
 //!   `Artifacts` into the ELF file.
 
-use anyhow::Result;
+use anyhow::{bail, ensure, Result};
 use std::collections::{btree_map, BTreeMap, BTreeSet};
 use std::{any::Any, collections::HashMap};
+use target_lexicon::Architecture;
+use wasmtime_environ::wasmparser::WasmFeatures;
 use wasmtime_environ::{
     Compiler, DefinedFuncIndex, FuncIndex, FunctionBodyData, ModuleTranslation, ModuleType,
     ModuleTypes, PrimaryMap, SignatureIndex, StaticModuleIndex, Tunables, WasmFunctionInfo,
 };
 use wasmtime_jit::{CompiledFunctionInfo, CompiledModuleInfo};
+
+mod config;
+pub use config::{probestack_supported, CompilerConfig, Strategy};
 
 type CompileInput<'a> = Box<dyn FnOnce(&dyn Compiler) -> Result<CompileOutput> + Send + 'a>;
 
@@ -684,4 +689,113 @@ impl Artifacts {
         assert!(self.trampolines.is_empty());
         self.modules.into_iter().next().unwrap().1
     }
+}
+
+#[cfg(any(feature = "cranelift", feature = "winch"))]
+pub fn build_compiler(
+    mut compiler_config: CompilerConfig,
+    tunables: &Tunables,
+    features: WasmFeatures,
+    native_unwind_info: Option<bool>,
+) -> Result<(CompilerConfig, Box<dyn wasmtime_environ::Compiler>)> {
+    let mut compiler = match compiler_config.strategy {
+        #[cfg(feature = "cranelift")]
+        Strategy::Auto => wasmtime_cranelift::builder(),
+        #[cfg(all(feature = "winch", not(feature = "cranelift")))]
+        Strategy::Auto => wasmtime_winch::builder(),
+        #[cfg(feature = "cranelift")]
+        Strategy::Cranelift => wasmtime_cranelift::builder(),
+        #[cfg(not(feature = "cranelift"))]
+        Strategy::Cranelift => bail!("cranelift support not compiled in"),
+        #[cfg(feature = "winch")]
+        Strategy::Winch => wasmtime_winch::builder(),
+        #[cfg(not(feature = "winch"))]
+        Strategy::Winch => bail!("winch support not compiled in"),
+    };
+
+    if let Some(target) = &compiler_config.target {
+        compiler.target(target.clone())?;
+    }
+
+    if let Some(path) = &compiler_config.clif_dir {
+        compiler.clif_dir(path)?;
+    }
+
+    // If probestack is enabled for a target, Wasmtime will always use the
+    // inline strategy which doesn't require us to define a `__probestack`
+    // function or similar.
+    compiler_config
+        .settings
+        .insert("probestack_strategy".into(), "inline".into());
+
+    let host = target_lexicon::Triple::host();
+    let target = compiler_config.target.as_ref().unwrap_or(&host).clone();
+
+    // On supported targets, we enable stack probing by default.
+    // This is required on Windows because of the way Windows
+    // commits its stacks, but it's also a good idea on other
+    // platforms to ensure guard pages are hit for large frame
+    // sizes.
+    if probestack_supported(target.architecture) {
+        compiler_config.flags.insert("enable_probestack".into());
+    }
+
+    if features.tail_call {
+        ensure!(
+            target.architecture != Architecture::S390x,
+            "Tail calls are not supported on s390x yet: \
+                 https://github.com/bytecodealliance/wasmtime/issues/6530"
+        );
+    }
+
+    if let Some(unwind_requested) = native_unwind_info {
+        if !compiler_config
+            .ensure_setting_unset_or_given("unwind_info", &unwind_requested.to_string())
+        {
+            bail!(
+                "incompatible settings requested for Cranelift and Wasmtime `unwind-info` settings"
+            );
+        }
+    }
+
+    if target.operating_system == target_lexicon::OperatingSystem::Windows {
+        if !compiler_config.ensure_setting_unset_or_given("unwind_info", "true") {
+            bail!("`native_unwind_info` cannot be disabled on Windows");
+        }
+    }
+
+    // We require frame pointers for correct stack walking, which is safety
+    // critical in the presence of reference types, and otherwise it is just
+    // really bad developer experience to get wrong.
+    compiler_config
+        .settings
+        .insert("preserve_frame_pointers".into(), "true".into());
+
+    // check for incompatible compiler options and set required values
+    if features.reference_types {
+        if !compiler_config.ensure_setting_unset_or_given("enable_safepoints", "true") {
+            bail!("compiler option 'enable_safepoints' must be enabled when 'reference types' is enabled");
+        }
+    }
+
+    if features.relaxed_simd && !features.simd {
+        bail!("cannot disable the simd proposal but enable the relaxed simd proposal");
+    }
+
+    // Apply compiler settings and flags
+    for (k, v) in compiler_config.settings.iter() {
+        compiler.set(k, v)?;
+    }
+    for flag in compiler_config.flags.iter() {
+        compiler.enable(flag)?;
+    }
+
+    if let Some(cache_store) = &compiler_config.cache_store {
+        compiler.enable_incremental_compilation(cache_store.clone())?;
+    }
+
+    compiler.set_tunables(tunables.clone())?;
+    compiler.wmemcheck(compiler_config.wmemcheck);
+
+    Ok((compiler_config, compiler.build()?))
 }

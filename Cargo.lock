@@ -3415,8 +3415,10 @@ dependencies = [
  "anyhow",
  "object",
  "target-lexicon",
+ "wasmtime-cranelift",
  "wasmtime-environ",
  "wasmtime-jit",
+ "wasmtime-winch",
 ]
 
 [[package]]
