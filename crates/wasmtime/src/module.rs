@@ -18,7 +18,7 @@ use wasmtime_environ::{
     DefinedFuncIndex, DefinedMemoryIndex, HostPtr, ModuleEnvironment, ModuleTypes, ObjectKind,
     VMOffsets,
 };
-use wasmtime_jit_runtime::{CodeMemory, CompiledModule, CompiledModuleInfo};
+use wasmtime_jit_runtime::{CodeMemory, CompiledModule, CompiledModuleInfo, MmapCodeMemory};
 use wasmtime_runtime::{
     CompiledModuleId, MemoryImage, MmapVec, ModuleMemoryImages, VMArrayCallFunction,
     VMNativeCallFunction, VMSharedSignatureIndex, VMWasmCallFunction,
@@ -301,6 +301,8 @@ impl Module {
     #[cfg(any(feature = "cranelift", feature = "winch"))]
     #[cfg_attr(nightlydoc, doc(cfg(any(feature = "cranelift", feature = "winch"))))]
     pub fn from_binary(engine: &Engine, binary: &[u8]) -> Result<Module> {
+        use wasmtime_jit_runtime::unwind;
+
         engine
             .check_compatible_with_native_host()
             .context("compilation settings are not compatible with the native host")?;
@@ -342,8 +344,11 @@ impl Module {
         let info_and_types = info_and_types.map(|(info, types)| (info, types.into()));
         return Self::from_parts(engine, code, info_and_types);
 
-        fn publish_mmap(mmap: MmapVec) -> Result<Arc<CodeMemory>> {
-            let mut code = CodeMemory::new(mmap)?;
+        fn publish_mmap(mmap: MmapVec) -> Result<Arc<MmapCodeMemory>> {
+            let mut code = MmapCodeMemory::new(CodeMemory::new(
+                mmap,
+                unwind::UnwindRegistration::SECTION_NAME,
+            )?);
             code.publish()?;
             Ok(Arc::new(code))
         }
@@ -399,6 +404,8 @@ impl Module {
         engine: &Engine,
         wasm: &[u8],
     ) -> Result<(MmapVec, Option<(CompiledModuleInfo, ModuleTypes)>)> {
+        use wasmtime_jit_runtime::mmap_instantiate::finish_object;
+
         use crate::compiler::CompileInputs;
 
         let tunables = &engine.config().tunables;
@@ -445,9 +452,9 @@ impl Module {
 
         let info = compilation_artifacts.unwrap_as_module_info();
         object.serialize_info(&(&info, &types));
-        let mmap = object.finish()?;
+        let mmap = finish_object(object)?;
 
-        Ok((mmap, Some((info, types))))
+        return Ok((mmap, Some((info, types))));
     }
 
     /// Deserializes an in-memory compiled module previously created with
@@ -534,7 +541,7 @@ impl Module {
     /// compiled and the values are already available.
     fn from_parts(
         engine: &Engine,
-        code_memory: Arc<CodeMemory>,
+        code_memory: Arc<MmapCodeMemory>,
         info_and_types: Option<(CompiledModuleInfo, ModuleTypes)>,
     ) -> Result<Self> {
         // Acquire this module's metadata and type information, deserializing
@@ -1066,7 +1073,7 @@ impl Module {
     pub fn address_map<'a>(&'a self) -> Option<impl Iterator<Item = (usize, Option<u32>)> + 'a> {
         Some(
             wasmtime_environ::iterate_address_map(
-                self.code_object().code_memory().address_map_data(),
+                self.code_object().code_memory().memory().address_map_data(),
             )?
             .map(|(offset, file_pos)| (offset as usize, file_pos.file_offset())),
         )

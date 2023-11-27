@@ -4,7 +4,7 @@ use crate::{Engine, FuncType, ValRaw};
 use anyhow::Result;
 use std::panic::{self, AssertUnwindSafe};
 use std::ptr::NonNull;
-use wasmtime_jit_runtime::CodeMemory;
+use wasmtime_jit_runtime::{CodeMemory, MmapCodeMemory};
 use wasmtime_runtime::{
     StoreBox, VMArrayCallHostFuncContext, VMContext, VMFuncRef, VMOpaqueContext,
 };
@@ -12,7 +12,7 @@ use wasmtime_runtime::{
 struct TrampolineState<F> {
     func: F,
     #[allow(dead_code)]
-    code_memory: CodeMemory,
+    code_memory: MmapCodeMemory,
 }
 
 /// Shim to call a host-defined function that uses the array calling convention.
@@ -83,6 +83,8 @@ where
 {
     use std::ptr;
 
+    use wasmtime_jit_runtime::{mmap_instantiate::finish_object, unwind::UnwindRegistration};
+
     let mut obj = engine
         .compiler()
         .object(wasmtime_environ::ObjectKind::Module)?;
@@ -94,11 +96,15 @@ where
             &mut obj,
         )?;
     engine.append_bti(&mut obj);
-    let obj = wasmtime_jit_runtime::ObjectBuilder::new(obj, &engine.config().tunables).finish()?;
+    let obj = finish_object(wasmtime_jit_runtime::ObjectBuilder::new(
+        obj,
+        &engine.config().tunables,
+    ))?;
 
     // Copy the results of JIT compilation into executable memory, and this will
     // also take care of unwind table registration.
-    let mut code_memory = CodeMemory::new(obj)?;
+    let mut code_memory =
+        MmapCodeMemory::new(CodeMemory::new(obj, UnwindRegistration::SECTION_NAME)?);
     code_memory.publish()?;
 
     engine.profiler().register_module(&code_memory, &|_| None);

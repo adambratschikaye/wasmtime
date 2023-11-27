@@ -3,6 +3,7 @@
 use crate::CodeMemory;
 #[allow(unused_imports)]
 use anyhow::{bail, Result};
+use wasmtime_runtime::MmapVec;
 
 cfg_if::cfg_if! {
     if #[cfg(all(feature = "profiling", target_os = "linux"))] {
@@ -51,7 +52,11 @@ cfg_if::cfg_if! {
 pub trait ProfilingAgent: Send + Sync + 'static {
     fn register_function(&self, name: &str, addr: *const u8, size: usize);
 
-    fn register_module(&self, code: &CodeMemory, custom_name: &dyn Fn(usize) -> Option<String>) {
+    fn register_module(
+        &self,
+        code: &CodeMemory<MmapVec>,
+        custom_name: &dyn Fn(usize) -> Option<String>,
+    ) {
         use object::{File, Object as _, ObjectSection, ObjectSymbol, SectionKind, SymbolKind};
 
         let image = match File::parse(&code.mmap()[..]) {
@@ -104,5 +109,10 @@ struct NullProfilerAgent;
 
 impl ProfilingAgent for NullProfilerAgent {
     fn register_function(&self, _name: &str, _addr: *const u8, _size: usize) {}
-    fn register_module(&self, _code: &CodeMemory, _custom_name: &dyn Fn(usize) -> Option<String>) {}
+    fn register_module(
+        &self,
+        _code: &CodeMemory<MmapVec>,
+        _custom_name: &dyn Fn(usize) -> Option<String>,
+    ) {
+    }
 }

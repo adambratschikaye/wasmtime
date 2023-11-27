@@ -7,15 +7,14 @@ mod code_memory;
 mod debug;
 mod demangling;
 mod instantiate;
-pub mod profiling;
-mod unwind;
 
-pub use crate::code_memory::CodeMemory;
-#[cfg(feature = "addr2line")]
-pub use crate::instantiate::SymbolizeContext;
+pub use crate::code_memory::{CodeMemory, LibCalls};
+// #[cfg(feature = "addr2line")]
+// pub use crate::instantiate::SymbolizeContext;
 pub use crate::instantiate::{
-    subslice_range, CompiledFunctionInfo, CompiledModule, CompiledModuleInfo, ObjectBuilder,
+    subslice_range, CompiledFunctionInfo, CompiledModuleInfo, FunctionName, Metadata, ObjectBuilder,
 };
+pub use debug::create_gdbjit_image;
 pub use demangling::*;
 
 /// Version number of this crate.

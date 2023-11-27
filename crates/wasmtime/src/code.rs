@@ -3,7 +3,7 @@ use std::sync::Arc;
 #[cfg(feature = "component-model")]
 use wasmtime_environ::component::ComponentTypes;
 use wasmtime_environ::ModuleTypes;
-use wasmtime_jit_runtime::CodeMemory;
+use wasmtime_jit_runtime::MmapCodeMemory;
 
 /// Metadata in Wasmtime about a loaded compiled artifact in memory which is
 /// ready to execute.
@@ -20,7 +20,7 @@ pub struct CodeObject {
     /// global module registry of traps. While probably not strictly necessary
     /// and could be avoided with some refactorings is a hopefully a relatively
     /// minor `Arc` for now.
-    mmap: Arc<CodeMemory>,
+    mmap: Arc<MmapCodeMemory>,
 
     /// Registered shared signature for the loaded object.
     ///
@@ -37,7 +37,11 @@ pub struct CodeObject {
 }
 
 impl CodeObject {
-    pub fn new(mmap: Arc<CodeMemory>, signatures: SignatureCollection, types: Types) -> CodeObject {
+    pub fn new(
+        mmap: Arc<MmapCodeMemory>,
+        signatures: SignatureCollection,
+        types: Types,
+    ) -> CodeObject {
         // The corresopnding unregister for this is below in `Drop for
         // CodeObject`.
         crate::module::register_code(&mmap);
@@ -49,7 +53,7 @@ impl CodeObject {
         }
     }
 
-    pub fn code_memory(&self) -> &Arc<CodeMemory> {
+    pub fn code_memory(&self) -> &Arc<MmapCodeMemory> {
         &self.mmap
     }
 

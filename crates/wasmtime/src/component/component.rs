@@ -13,7 +13,7 @@ use wasmtime_environ::component::{
     TrampolineIndex, Translator, VMComponentOffsets,
 };
 use wasmtime_environ::{FunctionLoc, HostPtr, ObjectKind, PrimaryMap, ScopeVec};
-use wasmtime_jit_runtime::{CodeMemory, CompiledModuleInfo};
+use wasmtime_jit_runtime::{CodeMemory, CompiledModuleInfo, MmapCodeMemory};
 use wasmtime_runtime::component::ComponentRuntimeInfo;
 use wasmtime_runtime::{
     MmapVec, VMArrayCallFunction, VMFuncRef, VMFunctionBody, VMNativeCallFunction,
@@ -127,12 +127,15 @@ impl Component {
     #[cfg(any(feature = "cranelift", feature = "winch"))]
     #[cfg_attr(nightlydoc, doc(cfg(any(feature = "cranelift", feature = "winch"))))]
     pub fn from_binary(engine: &Engine, binary: &[u8]) -> Result<Component> {
+        use wasmtime_jit_runtime::unwind::UnwindRegistration;
+
         engine
             .check_compatible_with_native_host()
             .context("compilation settings are not compatible with the native host")?;
 
         let (mmap, artifacts) = Component::build_artifacts(engine, binary)?;
-        let mut code_memory = CodeMemory::new(mmap)?;
+        let mut code_memory =
+            MmapCodeMemory::new(CodeMemory::new(mmap, UnwindRegistration::SECTION_NAME)?);
         code_memory.publish()?;
         Component::from_parts(engine, Arc::new(code_memory), Some(artifacts))
     }
@@ -174,6 +177,8 @@ impl Component {
         engine: &Engine,
         binary: &[u8],
     ) -> Result<(MmapVec, ComponentArtifacts)> {
+        use wasmtime_jit_runtime::mmap_instantiate::finish_object;
+
         use crate::compiler::CompileInputs;
 
         let tunables = &engine.config().tunables;
@@ -224,7 +229,7 @@ impl Component {
         };
         object.serialize_info(&artifacts);
 
-        let mmap = object.finish()?;
+        let mmap = finish_object(object)?;
         Ok((mmap, artifacts))
     }
 
@@ -234,7 +239,7 @@ impl Component {
     /// deserialized from `code_memory`.
     fn from_parts(
         engine: &Engine,
-        code_memory: Arc<CodeMemory>,
+        code_memory: Arc<MmapCodeMemory>,
         artifacts: Option<ComponentArtifacts>,
     ) -> Result<Component> {
         let ComponentArtifacts {
