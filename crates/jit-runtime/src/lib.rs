@@ -4,4 +4,4 @@ pub mod profiling;
 mod unwind;
 
 pub use code_memory::CodeMemory;
-pub use instantiate::{finish_object, CompiledModule};
+pub use instantiate::{finish_object, CompiledModule, MmapVecWrapper};
