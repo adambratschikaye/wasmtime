@@ -103,6 +103,18 @@ pub fn lookup(triple: Triple) -> Result<Builder, LookupError> {
         Architecture::Aarch64 { .. } => isa_builder!(aarch64, (feature = "arm64"), triple),
         Architecture::S390x { .. } => isa_builder!(s390x, (feature = "s390x"), triple),
         Architecture::Riscv64 { .. } => isa_builder!(riscv64, (feature = "riscv64"), triple),
+        Architecture::Wasm32 { .. } => Ok(IsaBuilder {
+            triple,
+            setup: settings::Builder::new(&settings::detail::Template {
+                name: "",
+                descriptors: &[],
+                enumerators: &[],
+                hash_table: &[],
+                defaults: &[],
+                presets: &[],
+            }),
+            constructor: |_, _, _| panic!("Wasm32 is not a supported target"),
+        }),
         _ => Err(LookupError::Unsupported),
     }
 }
