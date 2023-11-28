@@ -5,7 +5,7 @@ use object::{
     write::{Object, StandardSegment},
     SectionKind,
 };
-use serde::{Deserialize, Serialize};
+use serde_derive::{Deserialize, Serialize};
 use wasmtime_environ::{obj, Compiler, FlagValue, Tunables};
 
 use crate::config::ModuleVersionStrategy;
