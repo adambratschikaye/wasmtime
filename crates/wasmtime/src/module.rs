@@ -5,7 +5,8 @@ use crate::{
     types::{ExportType, ExternType, ImportType},
     Engine,
 };
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Context, Error, Result};
+use object::write::WritableBuffer;
 use once_cell::sync::OnceCell;
 use std::fs;
 use std::mem;
@@ -15,10 +16,11 @@ use std::ptr::NonNull;
 use std::sync::Arc;
 use wasmparser::{Parser, ValidPayload, Validator};
 use wasmtime_environ::{
-    DefinedFuncIndex, DefinedMemoryIndex, HostPtr, ModuleEnvironment, ModuleTypes, ObjectKind,
-    VMOffsets,
+    DefinedFuncIndex, DefinedMemoryIndex, HostPtr, ModuleTypes, ObjectKind, VMOffsets,
 };
-use wasmtime_jit_runtime::{CodeMemory, CompiledModule, CompiledModuleInfo, MmapCodeMemory};
+use wasmtime_jit_runtime::{
+    CodeMemory, CompiledModule, CompiledModuleInfo, FinishedObject, MmapCodeMemory, ObjectBuilder,
+};
 use wasmtime_runtime::{
     CompiledModuleId, MemoryImage, MmapVec, ModuleMemoryImages, VMArrayCallFunction,
     VMNativeCallFunction, VMSharedSignatureIndex, VMWasmCallFunction,
@@ -404,62 +406,15 @@ impl Module {
         engine: &Engine,
         wasm: &[u8],
     ) -> Result<(MmapVec, Option<(CompiledModuleInfo, ModuleTypes)>)> {
-        use wasmtime_compile::CompileInputs;
-        use wasmtime_jit_runtime::mmap_instantiate::finish_object;
-
-        let tunables = &engine.config().tunables;
-
-        // First a `ModuleEnvironment` is created which records type information
-        // about the wasm module. This is where the WebAssembly is parsed and
-        // validated. Afterwards `types` will have all the type information for
-        // this module.
-        let mut validator =
-            wasmparser::Validator::new_with_features(engine.config().features.clone());
-        let parser = wasmparser::Parser::new(0);
-        let mut types = Default::default();
-        let mut translation = ModuleEnvironment::new(tunables, &mut validator, &mut types)
-            .translate(parser, wasm)
-            .context("failed to parse WebAssembly module")?;
-        let functions = mem::take(&mut translation.function_body_inputs);
-        let types = types.finish();
-
-        let compile_inputs = CompileInputs::for_module(&types, &translation, functions);
-        let unlinked_compile_outputs = compile_inputs.compile(engine.compiler())?;
-        let (compiled_funcs, function_indices) = unlinked_compile_outputs.pre_link();
-
-        // Emplace all compiled functions into the object file with any other
-        // sections associated with code as well.
-        let mut object = engine.compiler().object(ObjectKind::Module)?;
-        // Insert `Engine` and type-level information into the compiled
-        // artifact so if this module is deserialized later it contains all
-        // information necessary.
-        //
-        // Note that `append_compiler_info` and `append_types` here in theory
-        // can both be skipped if this module will never get serialized.
-        // They're only used during deserialization and not during runtime for
-        // the module itself. Currently there's no need for that, however, so
-        // it's left as an exercise for later.
-        engine.append_compiler_info(&mut object);
-        engine.append_bti(&mut object);
-
-        let (mut object, compilation_artifacts) = function_indices.link_and_append_code(
-            object,
+        let (wrapper, info): (MmapVecWrapper, _) = wasmtime_compile::build_artifacts(
             engine.compiler(),
             &engine.config().tunables,
-            if engine.config().memory_init_cow {
-                Some(engine.config().memory_guaranteed_dense_image_size)
-            } else {
-                None
-            },
-            compiled_funcs,
-            std::iter::once(translation).collect(),
+            engine.config().features,
+            &engine.config().module_version,
+            engine.config().get_memory_guaranteed_dense_image_size(),
+            wasm,
         )?;
-
-        let info = compilation_artifacts.unwrap_as_module_info();
-        object.serialize_info(&(&info, &types));
-        let mmap = finish_object(object)?;
-
-        return Ok((mmap, Some((info, types))));
+        Ok((wrapper.0, info))
     }
 
     /// Deserializes an in-memory compiled module previously created with
@@ -1357,6 +1312,73 @@ fn memory_images(engine: &Engine, module: &CompiledModule) -> Result<Option<Modu
     ModuleMemoryImages::new(module.module(), module.code_memory().wasm_data(), mmap)
 }
 
+struct MmapVecWrapper(MmapVec);
+
+impl FinishedObject for MmapVecWrapper {
+    fn finish_object(obj: ObjectBuilder<'_>) -> Result<Self> {
+        let mut result = ObjectMmap::default();
+        return match obj.finish(&mut result) {
+            Ok(()) => {
+                assert!(result.mmap.is_some(), "no reserve");
+                let mmap = result.mmap.expect("reserve not called");
+                assert_eq!(mmap.len(), result.len);
+                Ok(MmapVecWrapper(mmap))
+            }
+            Err(e) => match result.err.take() {
+                Some(original) => Err(original.context(e)),
+                None => Err(e.into()),
+            },
+        };
+
+        /// Helper struct to implement the `WritableBuffer` trait from the `object`
+        /// crate.
+        ///
+        /// This enables writing an object directly into an mmap'd memory so it's
+        /// immediately usable for execution after compilation. This implementation
+        /// relies on a call to `reserve` happening once up front with all the needed
+        /// data, and the mmap internally does not attempt to grow afterwards.
+        #[derive(Default)]
+        struct ObjectMmap {
+            mmap: Option<MmapVec>,
+            len: usize,
+            err: Option<Error>,
+        }
+
+        impl WritableBuffer for ObjectMmap {
+            fn len(&self) -> usize {
+                self.len
+            }
+
+            fn reserve(&mut self, additional: usize) -> Result<(), ()> {
+                assert!(self.mmap.is_none(), "cannot reserve twice");
+                self.mmap = match MmapVec::with_capacity(additional) {
+                    Ok(mmap) => Some(mmap),
+                    Err(e) => {
+                        self.err = Some(e);
+                        return Err(());
+                    }
+                };
+                Ok(())
+            }
+
+            fn resize(&mut self, new_len: usize) {
+                // Resizing always appends 0 bytes and since new mmaps start out as 0
+                // bytes we don't actually need to do anything as part of this other
+                // than update our own length.
+                if new_len <= self.len {
+                    return;
+                }
+                self.len = new_len;
+            }
+
+            fn write_bytes(&mut self, val: &[u8]) {
+                let mmap = self.mmap.as_mut().expect("write before reserve");
+                mmap[self.len..][..val.len()].copy_from_slice(val);
+                self.len += val.len();
+            }
+        }
+    }
+}
 #[cfg(test)]
 mod tests {
     use crate::{Engine, Module};

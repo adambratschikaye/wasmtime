@@ -361,6 +361,47 @@ impl<'a> ObjectBuilder<'a> {
     }
 }
 
+/// TODO: doc
+pub trait FinishedObject: Sized {
+    /// TODO: doc
+    fn finish_object(obj: ObjectBuilder<'_>) -> Result<Self>;
+}
+
+impl FinishedObject for Vec<u8> {
+    fn finish_object(obj: ObjectBuilder<'_>) -> Result<Self> {
+        let mut result = ObjectVec::default();
+        obj.finish(&mut result)?;
+        return Ok(result.0);
+
+        #[derive(Default)]
+        struct ObjectVec(Vec<u8>);
+
+        impl WritableBuffer for ObjectVec {
+            fn len(&self) -> usize {
+                self.0.len()
+            }
+
+            fn reserve(&mut self, additional: usize) -> Result<(), ()> {
+                assert_eq!(self.0.len(), 0, "cannot reserve twice");
+                self.0 = Vec::with_capacity(additional);
+                Ok(())
+            }
+
+            fn resize(&mut self, new_len: usize) {
+                if new_len <= self.0.len() {
+                    self.0.truncate(new_len)
+                } else {
+                    self.0.extend(vec![0; new_len - self.0.len()])
+                }
+            }
+
+            fn write_bytes(&mut self, val: &[u8]) {
+                self.0.extend(val);
+            }
+        }
+    }
+}
+
 /// Returns the range of `inner` within `outer`, such that `outer[range]` is the
 /// same as `inner`.
 ///

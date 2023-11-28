@@ -31,7 +31,7 @@ use wasmtime_environ::{
     Compiler, DefinedFuncIndex, FuncIndex, FunctionBodyData, ModuleTranslation, ModuleType,
     ModuleTypes, PrimaryMap, SignatureIndex, StaticModuleIndex, Tunables, WasmFunctionInfo,
 };
-use wasmtime_jit::{CompiledFunctionInfo, CompiledModuleInfo, ObjectBuilder};
+use wasmtime_jit::{CompiledFunctionInfo, CompiledModuleInfo};
 
 mod config;
 pub use config::{probestack_supported, CompilerConfig, ModuleVersionStrategy, Strategy};
@@ -802,10 +802,6 @@ pub fn build_compiler(
     Ok((compiler_config, compiler.build()?))
 }
 
-pub trait FinishedObject: Sized {
-    fn finish_object(obj: ObjectBuilder<'_>) -> Result<Self>;
-}
-
 /// Converts an input binary-encoded WebAssembly module to compilation
 /// artifacts and type information.
 ///
@@ -819,7 +815,7 @@ pub trait FinishedObject: Sized {
 /// `Some`, notably compiled metadata about the module in addition to the
 /// type information found within.
 #[cfg(any(feature = "cranelift", feature = "winch"))]
-pub fn build_artifacts<T: FinishedObject>(
+pub fn build_artifacts<T: wasmtime_jit::FinishedObject>(
     compiler: &dyn Compiler,
     tunables: &Tunables,
     features: WasmFeatures,

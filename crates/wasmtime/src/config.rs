@@ -1618,6 +1618,14 @@ impl Config {
         self.macos_use_mach_ports = mach_ports;
         self
     }
+
+    pub(crate) fn get_memory_guaranteed_dense_image_size(&self) -> Option<u64> {
+        if self.memory_init_cow {
+            Some(self.memory_guaranteed_dense_image_size)
+        } else {
+            None
+        }
+    }
 }
 
 fn round_up_to_pages(val: u64) -> u64 {
