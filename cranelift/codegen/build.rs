@@ -26,7 +26,10 @@ fn main() {
     let start_time = Instant::now();
 
     let out_dir = env::var("OUT_DIR").expect("The OUT_DIR environment variable must be set");
-    let target_triple = env::var("TARGET").expect("The TARGET environment variable must be set");
+    let target_triple = env::var("CRANELIFT_TARGET").unwrap_or_else(|_| {
+        env::var("TARGET")
+            .expect("The TARGET or CRANELIFT_TARGET environment variables must be set")
+    });
 
     let mut isas = meta::isa::Isa::all()
         .iter()
