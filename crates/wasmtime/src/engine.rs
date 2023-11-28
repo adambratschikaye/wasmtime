@@ -1,8 +1,7 @@
 use crate::signatures::SignatureRegistry;
 use crate::Config;
 use anyhow::{Context, Result};
-use object::write::{Object, StandardSegment};
-use object::SectionKind;
+use object::write::Object;
 use once_cell::sync::OnceCell;
 #[cfg(feature = "parallel-compilation")]
 use rayon::prelude::*;
@@ -11,10 +10,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 #[cfg(feature = "cache")]
 use wasmtime_cache::CacheConfig;
-use wasmtime_environ::obj;
+use wasmtime_compile::Metadata;
 use wasmtime_environ::{FlagValue, ObjectKind};
-use wasmtime_jit_runtime::{profiling::ProfilingAgent, CodeMemory};
-use wasmtime_jit_runtime::{unwind::UnwindRegistration, MmapCodeMemory};
+use wasmtime_jit_runtime::{
+    profiling::ProfilingAgent, unwind::UnwindRegistration, CodeMemory, MmapCodeMemory,
+};
 use wasmtime_runtime::{CompiledModuleIdAllocator, InstanceAllocator, MmapVec};
 
 mod serialization;
@@ -349,6 +349,38 @@ impl Engine {
         Ok(())
     }
 
+    pub(crate) fn check_compatible_with_metadata(
+        &self,
+        metadata: &wasmtime_compile::Metadata,
+    ) -> Result<()> {
+        metadata.check_compatible(
+            self.compiler(),
+            &self.config().tunables,
+            &self.config().features,
+        )?;
+        self.check_shared_flags(metadata)?;
+        self.check_isa_flags(metadata)?;
+        Ok(())
+    }
+
+    fn check_shared_flags(&self, metadata: &wasmtime_compile::Metadata) -> Result<()> {
+        for (name, val) in metadata.shared_flags() {
+            self.check_compatible_with_shared_flag(name, val)
+                .map_err(|s| anyhow::Error::msg(s))
+                .context("compilation settings of module incompatible with native host")?;
+        }
+        Ok(())
+    }
+
+    fn check_isa_flags(&self, metadata: &wasmtime_compile::Metadata) -> Result<()> {
+        for (name, val) in metadata.isa_flags() {
+            self.check_compatible_with_isa_flag(name, val)
+                .map_err(|s| anyhow::Error::msg(s))
+                .context("compilation settings of module incompatible with native host")?;
+        }
+        Ok(())
+    }
+
     /// Checks to see whether the "shared flag", something enabled for
     /// individual compilers, is compatible with the native host platform.
     ///
@@ -579,24 +611,28 @@ impl Engine {
         ))
     }
 
+    pub(crate) fn metadata(&self) -> Metadata {
+        Metadata::new(
+            self.compiler(),
+            self.config().features,
+            &self.config().tunables,
+        )
+    }
+
     #[cfg(any(feature = "cranelift", feature = "winch"))]
     pub(crate) fn append_compiler_info(&self, obj: &mut Object<'_>) {
-        serialization::append_compiler_info(self, obj);
+        wasmtime_compile::append_compiler_info(
+            self.compiler(),
+            self.config().features,
+            &self.config().tunables,
+            &self.config().module_version,
+            obj,
+        );
     }
 
     #[cfg(any(feature = "cranelift", feature = "winch"))]
     pub(crate) fn append_bti(&self, obj: &mut Object<'_>) {
-        let section = obj.add_section(
-            obj.segment_name(StandardSegment::Data).to_vec(),
-            obj::ELF_WASM_BTI.as_bytes().to_vec(),
-            SectionKind::ReadOnlyData,
-        );
-        let contents = if self.compiler().is_branch_protection_enabled() {
-            1
-        } else {
-            0
-        };
-        obj.append_section_data(section, &[contents], 1);
+        wasmtime_compile::append_bti(self.compiler(), obj);
     }
 
     /// Loads a `CodeMemory` from the specified in-memory slice, copying it to a
@@ -686,10 +722,11 @@ mod tests {
         hash::{Hash, Hasher},
     };
 
-    use crate::{Config, Engine, Module, ModuleVersionStrategy, OptLevel};
+    use crate::{Config, Engine, Module, OptLevel};
 
     use anyhow::Result;
     use tempfile::TempDir;
+    use wasmtime_compile::ModuleVersionStrategy;
 
     #[test]
     #[cfg_attr(miri, ignore)]

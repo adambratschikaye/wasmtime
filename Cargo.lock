@@ -3413,8 +3413,12 @@ name = "wasmtime-compile"
 version = "15.0.0"
 dependencies = [
  "anyhow",
+ "bincode",
  "object",
+ "serde",
+ "serde_derive",
  "target-lexicon",
+ "wasmparser",
  "wasmtime-cranelift",
  "wasmtime-environ",
  "wasmtime-jit",

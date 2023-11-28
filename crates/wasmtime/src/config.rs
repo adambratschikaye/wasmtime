@@ -10,7 +10,7 @@ use std::sync::Arc;
 use wasmparser::WasmFeatures;
 #[cfg(feature = "cache")]
 use wasmtime_cache::CacheConfig;
-use wasmtime_compile::CompilerConfig;
+use wasmtime_compile::{CompilerConfig, ModuleVersionStrategy};
 use wasmtime_environ::Tunables;
 use wasmtime_jit_runtime::profiling::{self, ProfilingAgent};
 use wasmtime_runtime::{mpk, InstanceAllocator, OnDemandInstanceAllocator, RuntimeMemoryCreator};
@@ -53,33 +53,6 @@ impl InstanceAllocationStrategy {
 impl Default for InstanceAllocationStrategy {
     fn default() -> Self {
         Self::OnDemand
-    }
-}
-
-#[derive(Clone)]
-/// Configure the strategy used for versioning in serializing and deserializing [`crate::Module`].
-pub enum ModuleVersionStrategy {
-    /// Use the wasmtime crate's Cargo package version.
-    WasmtimeVersion,
-    /// Use a custom version string. Must be at most 255 bytes.
-    Custom(String),
-    /// Emit no version string in serialization, and accept all version strings in deserialization.
-    None,
-}
-
-impl Default for ModuleVersionStrategy {
-    fn default() -> Self {
-        ModuleVersionStrategy::WasmtimeVersion
-    }
-}
-
-impl std::hash::Hash for ModuleVersionStrategy {
-    fn hash<H: std::hash::Hasher>(&self, hasher: &mut H) {
-        match self {
-            Self::WasmtimeVersion => env!("CARGO_PKG_VERSION").hash(hasher),
-            Self::Custom(s) => s.hash(hasher),
-            Self::None => {}
-        };
     }
 }
 

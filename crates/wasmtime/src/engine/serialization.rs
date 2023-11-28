@@ -21,48 +21,14 @@
 //! other random ELF files, as well as provide better error messages for
 //! using wasmtime artifacts across versions.
 
-use crate::{Engine, ModuleVersionStrategy, Precompiled};
+use crate::{Engine, Precompiled};
 use anyhow::{anyhow, bail, Context, Result};
-use object::write::{Object, StandardSegment};
-use object::{File, FileFlags, Object as _, ObjectSection, SectionKind};
-use serde_derive::{Deserialize, Serialize};
-use std::str::FromStr;
-use wasmtime_environ::obj;
-use wasmtime_environ::{FlagValue, ObjectKind, Tunables};
+use object::{File, FileFlags, Object as _, ObjectSection};
+use wasmtime_compile::{Metadata, ModuleVersionStrategy};
+use wasmtime_environ::{obj, ObjectKind};
 use wasmtime_runtime::MmapVec;
 
 const VERSION: u8 = 0;
-
-/// Produces a blob of bytes by serializing the `engine`'s configuration data to
-/// be checked, perhaps in a different process, with the `check_compatible`
-/// method below.
-///
-/// The blob of bytes is inserted into the object file specified to become part
-/// of the final compiled artifact.
-#[cfg(any(feature = "cranelift", feature = "winch"))]
-pub fn append_compiler_info(engine: &Engine, obj: &mut Object<'_>) {
-    let section = obj.add_section(
-        obj.segment_name(StandardSegment::Data).to_vec(),
-        obj::ELF_WASM_ENGINE.as_bytes().to_vec(),
-        SectionKind::ReadOnlyData,
-    );
-    let mut data = Vec::new();
-    data.push(VERSION);
-    let version = match &engine.config().module_version {
-        ModuleVersionStrategy::WasmtimeVersion => env!("CARGO_PKG_VERSION"),
-        ModuleVersionStrategy::Custom(c) => c,
-        ModuleVersionStrategy::None => "",
-    };
-    // This precondition is checked in Config::module_version:
-    assert!(
-        version.len() < 256,
-        "package version must be less than 256 bytes"
-    );
-    data.push(version.len() as u8);
-    data.extend_from_slice(version.as_bytes());
-    bincode::serialize_into(&mut data, &Metadata::new(engine)).unwrap();
-    obj.set_section_data(section, data, 1);
-}
 
 /// Verifies that the serialized engine in `mmap` is compatible with the
 /// `engine` provided.
@@ -141,7 +107,7 @@ pub fn check_compatible(engine: &Engine, mmap: &MmapVec, expected: ObjectKind) -
         }
         ModuleVersionStrategy::None => { /* ignore the version info, accept all */ }
     }
-    bincode::deserialize::<Metadata<'_>>(data)?.check_compatible(engine)
+    engine.check_compatible_with_metadata(&bincode::deserialize::<Metadata<'_>>(data)?)
 }
 
 fn detect_precompiled<'data, R: object::ReadRef<'data>>(
@@ -172,332 +138,20 @@ pub fn detect_precompiled_file(path: impl AsRef<std::path::Path>) -> Result<Opti
     Ok(detect_precompiled(obj))
 }
 
-#[derive(Serialize, Deserialize)]
-struct Metadata<'a> {
-    target: String,
-    #[serde(borrow)]
-    shared_flags: Vec<(&'a str, FlagValue<'a>)>,
-    #[serde(borrow)]
-    isa_flags: Vec<(&'a str, FlagValue<'a>)>,
-    tunables: Tunables,
-    features: WasmFeatures,
-}
-
-// This exists because `wasmparser::WasmFeatures` isn't serializable
-#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
-struct WasmFeatures {
-    reference_types: bool,
-    multi_value: bool,
-    bulk_memory: bool,
-    component_model: bool,
-    simd: bool,
-    tail_call: bool,
-    threads: bool,
-    multi_memory: bool,
-    exceptions: bool,
-    memory64: bool,
-    relaxed_simd: bool,
-    extended_const: bool,
-    function_references: bool,
-}
-
-impl Metadata<'_> {
-    #[cfg(any(feature = "cranelift", feature = "winch"))]
-    fn new(engine: &Engine) -> Metadata<'static> {
-        let wasmparser::WasmFeatures {
-            reference_types,
-            multi_value,
-            bulk_memory,
-            component_model,
-            simd,
-            threads,
-            tail_call,
-            multi_memory,
-            exceptions,
-            memory64,
-            relaxed_simd,
-            extended_const,
-            memory_control,
-            function_references,
-            gc,
-            component_model_values,
-
-            // Always on; we don't currently have knobs for these.
-            mutable_global: _,
-            saturating_float_to_int: _,
-            sign_extension: _,
-            floats: _,
-        } = engine.config().features;
-
-        assert!(!memory_control);
-        assert!(!gc);
-        assert!(!component_model_values);
-
-        Metadata {
-            target: engine.compiler().triple().to_string(),
-            shared_flags: engine.compiler().flags(),
-            isa_flags: engine.compiler().isa_flags(),
-            tunables: engine.config().tunables.clone(),
-            features: WasmFeatures {
-                reference_types,
-                multi_value,
-                bulk_memory,
-                component_model,
-                simd,
-                threads,
-                tail_call,
-                multi_memory,
-                exceptions,
-                memory64,
-                relaxed_simd,
-                extended_const,
-                function_references,
-            },
-        }
-    }
-
-    fn check_compatible(mut self, engine: &Engine) -> Result<()> {
-        self.check_triple(engine)?;
-        self.check_shared_flags(engine)?;
-        self.check_isa_flags(engine)?;
-        self.check_tunables(&engine.config().tunables)?;
-        self.check_features(&engine.config().features)?;
-        Ok(())
-    }
-
-    fn check_triple(&self, engine: &Engine) -> Result<()> {
-        let engine_target = engine.target();
-        let module_target =
-            target_lexicon::Triple::from_str(&self.target).map_err(|e| anyhow!(e))?;
-
-        if module_target.architecture != engine_target.architecture {
-            bail!(
-                "Module was compiled for architecture '{}'",
-                module_target.architecture
-            );
-        }
-
-        if module_target.operating_system != engine_target.operating_system {
-            bail!(
-                "Module was compiled for operating system '{}'",
-                module_target.operating_system
-            );
-        }
-
-        Ok(())
-    }
-
-    fn check_shared_flags(&mut self, engine: &Engine) -> Result<()> {
-        for (name, val) in self.shared_flags.iter() {
-            engine
-                .check_compatible_with_shared_flag(name, val)
-                .map_err(|s| anyhow::Error::msg(s))
-                .context("compilation settings of module incompatible with native host")?;
-        }
-        Ok(())
-    }
-
-    fn check_isa_flags(&mut self, engine: &Engine) -> Result<()> {
-        for (name, val) in self.isa_flags.iter() {
-            engine
-                .check_compatible_with_isa_flag(name, val)
-                .map_err(|s| anyhow::Error::msg(s))
-                .context("compilation settings of module incompatible with native host")?;
-        }
-        Ok(())
-    }
-
-    fn check_int<T: Eq + std::fmt::Display>(found: T, expected: T, feature: &str) -> Result<()> {
-        if found == expected {
-            return Ok(());
-        }
-
-        bail!(
-            "Module was compiled with a {} of '{}' but '{}' is expected for the host",
-            feature,
-            found,
-            expected
-        );
-    }
-
-    fn check_bool(found: bool, expected: bool, feature: &str) -> Result<()> {
-        if found == expected {
-            return Ok(());
-        }
-
-        bail!(
-            "Module was compiled {} {} but it {} enabled for the host",
-            if found { "with" } else { "without" },
-            feature,
-            if expected { "is" } else { "is not" }
-        );
-    }
-
-    fn check_tunables(&mut self, other: &Tunables) -> Result<()> {
-        let Tunables {
-            static_memory_bound,
-            static_memory_offset_guard_size,
-            dynamic_memory_offset_guard_size,
-            generate_native_debuginfo,
-            parse_wasm_debuginfo,
-            consume_fuel,
-            epoch_interruption,
-            static_memory_bound_is_maximum,
-            guard_before_linear_memory,
-            relaxed_simd_deterministic,
-            tail_callable,
-
-            // This doesn't affect compilation, it's just a runtime setting.
-            dynamic_memory_growth_reserve: _,
-
-            // This does technically affect compilation but modules with/without
-            // trap information can be loaded into engines with the opposite
-            // setting just fine (it's just a section in the compiled file and
-            // whether it's present or not)
-            generate_address_map: _,
-
-            // Just a debugging aid, doesn't affect functionality at all.
-            debug_adapter_modules: _,
-        } = self.tunables;
-
-        Self::check_int(
-            static_memory_bound,
-            other.static_memory_bound,
-            "static memory bound",
-        )?;
-        Self::check_int(
-            static_memory_offset_guard_size,
-            other.static_memory_offset_guard_size,
-            "static memory guard size",
-        )?;
-        Self::check_int(
-            dynamic_memory_offset_guard_size,
-            other.dynamic_memory_offset_guard_size,
-            "dynamic memory guard size",
-        )?;
-        Self::check_bool(
-            generate_native_debuginfo,
-            other.generate_native_debuginfo,
-            "debug information support",
-        )?;
-        Self::check_bool(
-            parse_wasm_debuginfo,
-            other.parse_wasm_debuginfo,
-            "WebAssembly backtrace support",
-        )?;
-        Self::check_bool(consume_fuel, other.consume_fuel, "fuel support")?;
-        Self::check_bool(
-            epoch_interruption,
-            other.epoch_interruption,
-            "epoch interruption",
-        )?;
-        Self::check_bool(
-            static_memory_bound_is_maximum,
-            other.static_memory_bound_is_maximum,
-            "pooling allocation support",
-        )?;
-        Self::check_bool(
-            guard_before_linear_memory,
-            other.guard_before_linear_memory,
-            "guard before linear memory",
-        )?;
-        Self::check_bool(
-            relaxed_simd_deterministic,
-            other.relaxed_simd_deterministic,
-            "relaxed simd deterministic semantics",
-        )?;
-        Self::check_bool(tail_callable, other.tail_callable, "WebAssembly tail calls")?;
-
-        Ok(())
-    }
-
-    fn check_features(&mut self, other: &wasmparser::WasmFeatures) -> Result<()> {
-        let WasmFeatures {
-            reference_types,
-            multi_value,
-            bulk_memory,
-            component_model,
-            simd,
-            tail_call,
-            threads,
-            multi_memory,
-            exceptions,
-            memory64,
-            relaxed_simd,
-            extended_const,
-            function_references,
-        } = self.features;
-
-        Self::check_bool(
-            reference_types,
-            other.reference_types,
-            "WebAssembly reference types support",
-        )?;
-        Self::check_bool(
-            multi_value,
-            other.multi_value,
-            "WebAssembly multi-value support",
-        )?;
-        Self::check_bool(
-            bulk_memory,
-            other.bulk_memory,
-            "WebAssembly bulk memory support",
-        )?;
-        Self::check_bool(
-            component_model,
-            other.component_model,
-            "WebAssembly component model support",
-        )?;
-        Self::check_bool(simd, other.simd, "WebAssembly SIMD support")?;
-        Self::check_bool(tail_call, other.tail_call, "WebAssembly tail calls support")?;
-        Self::check_bool(threads, other.threads, "WebAssembly threads support")?;
-        Self::check_bool(
-            multi_memory,
-            other.multi_memory,
-            "WebAssembly multi-memory support",
-        )?;
-        Self::check_bool(
-            exceptions,
-            other.exceptions,
-            "WebAssembly exceptions support",
-        )?;
-        Self::check_bool(
-            memory64,
-            other.memory64,
-            "WebAssembly 64-bit memory support",
-        )?;
-        Self::check_bool(
-            extended_const,
-            other.extended_const,
-            "WebAssembly extended-const support",
-        )?;
-        Self::check_bool(
-            relaxed_simd,
-            other.relaxed_simd,
-            "WebAssembly relaxed-simd support",
-        )?;
-        Self::check_bool(
-            function_references,
-            other.function_references,
-            "WebAssembly function-references support",
-        )?;
-
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod test {
+    use wasmtime_environ::FlagValue;
+
     use super::*;
     use crate::Config;
 
     #[test]
     fn test_architecture_mismatch() -> Result<()> {
         let engine = Engine::default();
-        let mut metadata = Metadata::new(&engine);
-        metadata.target = "unknown-generic-linux".to_string();
+        let mut metadata = engine.metadata();
+        *metadata.target() = "unknown-generic-linux".to_string();
 
-        match metadata.check_compatible(&engine) {
+        match engine.check_compatible_with_metadata(&metadata) {
             Ok(_) => unreachable!(),
             Err(e) => assert_eq!(
                 e.to_string(),
@@ -511,14 +165,14 @@ mod test {
     #[test]
     fn test_os_mismatch() -> Result<()> {
         let engine = Engine::default();
-        let mut metadata = Metadata::new(&engine);
+        let mut metadata = engine.metadata();
 
-        metadata.target = format!(
+        *metadata.target() = format!(
             "{}-generic-unknown",
             target_lexicon::Triple::host().architecture
         );
 
-        match metadata.check_compatible(&engine) {
+        match engine.check_compatible_with_metadata(&metadata) {
             Ok(_) => unreachable!(),
             Err(e) => assert_eq!(
                 e.to_string(),
@@ -532,13 +186,11 @@ mod test {
     #[test]
     fn test_cranelift_flags_mismatch() -> Result<()> {
         let engine = Engine::default();
-        let mut metadata = Metadata::new(&engine);
+        let mut metadata = engine.metadata();
 
-        metadata
-            .shared_flags
-            .push(("preserve_frame_pointers", FlagValue::Bool(false)));
+        metadata.push_shared_flag("preserve_frame_pointers", FlagValue::Bool(false));
 
-        match metadata.check_compatible(&engine) {
+        match engine.check_compatible_with_metadata(&metadata) {
             Ok(_) => unreachable!(),
             Err(e) => assert!(format!("{:?}", e).starts_with(
                 "\
@@ -555,13 +207,11 @@ Caused by:
     #[test]
     fn test_isa_flags_mismatch() -> Result<()> {
         let engine = Engine::default();
-        let mut metadata = Metadata::new(&engine);
+        let mut metadata = engine.metadata();
 
-        metadata
-            .isa_flags
-            .push(("not_a_flag", FlagValue::Bool(true)));
+        metadata.push_isa_flag("not_a_flag", FlagValue::Bool(true));
 
-        match metadata.check_compatible(&engine) {
+        match engine.check_compatible_with_metadata(&metadata) {
             Ok(_) => unreachable!(),
             Err(e) => assert!(format!("{:?}", e).starts_with(
                 "\
@@ -579,11 +229,11 @@ Caused by:
     #[cfg_attr(miri, ignore)]
     fn test_tunables_int_mismatch() -> Result<()> {
         let engine = Engine::default();
-        let mut metadata = Metadata::new(&engine);
+        let mut metadata = engine.metadata();
 
-        metadata.tunables.static_memory_offset_guard_size = 0;
+        metadata.tunables().static_memory_offset_guard_size = 0;
 
-        match metadata.check_compatible(&engine) {
+        match engine.check_compatible_with_metadata(&metadata) {
             Ok(_) => unreachable!(),
             Err(e) => assert_eq!(e.to_string(), "Module was compiled with a static memory guard size of '0' but '2147483648' is expected for the host"),
         }
@@ -597,10 +247,10 @@ Caused by:
         config.epoch_interruption(true);
 
         let engine = Engine::new(&config)?;
-        let mut metadata = Metadata::new(&engine);
-        metadata.tunables.epoch_interruption = false;
+        let mut metadata = engine.metadata();
+        metadata.tunables().epoch_interruption = false;
 
-        match metadata.check_compatible(&engine) {
+        match engine.check_compatible_with_metadata(&metadata) {
             Ok(_) => unreachable!(),
             Err(e) => assert_eq!(
                 e.to_string(),
@@ -612,10 +262,10 @@ Caused by:
         config.epoch_interruption(false);
 
         let engine = Engine::new(&config)?;
-        let mut metadata = Metadata::new(&engine);
-        metadata.tunables.epoch_interruption = true;
+        let mut metadata = engine.metadata();
+        metadata.tunables().epoch_interruption = true;
 
-        match metadata.check_compatible(&engine) {
+        match engine.check_compatible_with_metadata(&metadata) {
             Ok(_) => unreachable!(),
             Err(e) => assert_eq!(
                 e.to_string(),
@@ -632,10 +282,10 @@ Caused by:
         config.wasm_threads(true);
 
         let engine = Engine::new(&config)?;
-        let mut metadata = Metadata::new(&engine);
-        metadata.features.threads = false;
+        let mut metadata = engine.metadata();
+        *metadata.threads_feature() = false;
 
-        match metadata.check_compatible(&engine) {
+        match engine.check_compatible_with_metadata(&metadata) {
             Ok(_) => unreachable!(),
             Err(e) => assert_eq!(e.to_string(), "Module was compiled without WebAssembly threads support but it is enabled for the host"),
         }
@@ -644,10 +294,10 @@ Caused by:
         config.wasm_threads(false);
 
         let engine = Engine::new(&config)?;
-        let mut metadata = Metadata::new(&engine);
-        metadata.features.threads = true;
+        let mut metadata = engine.metadata();
+        *metadata.threads_feature() = true;
 
-        match metadata.check_compatible(&engine) {
+        match engine.check_compatible_with_metadata(&metadata) {
             Ok(_) => unreachable!(),
             Err(e) => assert_eq!(e.to_string(), "Module was compiled with WebAssembly threads support but it is not enabled for the host"),
         }

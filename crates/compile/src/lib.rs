@@ -31,10 +31,12 @@ use wasmtime_environ::{
     Compiler, DefinedFuncIndex, FuncIndex, FunctionBodyData, ModuleTranslation, ModuleType,
     ModuleTypes, PrimaryMap, SignatureIndex, StaticModuleIndex, Tunables, WasmFunctionInfo,
 };
-use wasmtime_jit::{CompiledFunctionInfo, CompiledModuleInfo};
+use wasmtime_jit::{CompiledFunctionInfo, CompiledModuleInfo, ObjectBuilder};
 
 mod config;
-pub use config::{probestack_supported, CompilerConfig, Strategy};
+pub use config::{probestack_supported, CompilerConfig, ModuleVersionStrategy, Strategy};
+mod serialization;
+pub use serialization::{append_bti, append_compiler_info, Metadata};
 
 type CompileInput<'a> = Box<dyn FnOnce(&dyn Compiler) -> Result<CompileOutput> + Send + 'a>;
 
@@ -798,4 +800,83 @@ pub fn build_compiler(
     compiler.wmemcheck(compiler_config.wmemcheck);
 
     Ok((compiler_config, compiler.build()?))
+}
+
+pub trait FinishedObject: Sized {
+    fn finish_object(obj: ObjectBuilder<'_>) -> Result<Self>;
+}
+
+/// Converts an input binary-encoded WebAssembly module to compilation
+/// artifacts and type information.
+///
+/// This is where compilation actually happens of WebAssembly modules and
+/// translation/parsing/validation of the binary input occurs. The binary
+/// artifact represented in the `MmapVec` returned here is an in-memory ELF
+/// file in an owned area of virtual linear memory where permissions (such
+/// as the executable bit) can be applied.
+///
+/// Additionally compilation returns an `Option` here which is always
+/// `Some`, notably compiled metadata about the module in addition to the
+/// type information found within.
+#[cfg(any(feature = "cranelift", feature = "winch"))]
+pub fn build_artifacts<T: FinishedObject>(
+    compiler: &dyn Compiler,
+    tunables: &Tunables,
+    features: WasmFeatures,
+    module_version: &crate::config::ModuleVersionStrategy,
+    memory_guaranteed_dense_image_size: Option<u64>,
+    wasm: &[u8],
+) -> Result<(T, Option<(CompiledModuleInfo, ModuleTypes)>)> {
+    use std::mem;
+
+    use anyhow::Context;
+    use wasmtime_environ::{ModuleEnvironment, ObjectKind};
+
+    // First a `ModuleEnvironment` is created which records type information
+    // about the wasm module. This is where the WebAssembly is parsed and
+    // validated. Afterwards `types` will have all the type information for
+    // this module.
+
+    let mut validator = wasmparser::Validator::new_with_features(features.clone());
+    let parser = wasmparser::Parser::new(0);
+    let mut types = Default::default();
+    let mut translation = ModuleEnvironment::new(tunables, &mut validator, &mut types)
+        .translate(parser, wasm)
+        .context("failed to parse WebAssembly module")?;
+    let functions = mem::take(&mut translation.function_body_inputs);
+    let types = types.finish();
+
+    let compile_inputs = CompileInputs::for_module(&types, &translation, functions);
+    let unlinked_compile_outputs = compile_inputs.compile(compiler)?;
+    let (compiled_funcs, function_indices) = unlinked_compile_outputs.pre_link();
+
+    // Emplace all compiled functions into the object file with any other
+    // sections associated with code as well.
+    let mut object = compiler.object(ObjectKind::Module)?;
+    // Insert `Engine` and type-level information into the compiled
+    // artifact so if this module is deserialized later it contains all
+    // information necessary.
+    //
+    // Note that `append_compiler_info` and `append_types` here in theory
+    // can both be skipped if this module will never get serialized.
+    // They're only used during deserialization and not during runtime for
+    // the module itself. Currently there's no need for that, however, so
+    // it's left as an exercise for later.
+    serialization::append_compiler_info(compiler, features, tunables, module_version, &mut object);
+    serialization::append_bti(compiler, &mut object);
+
+    let (mut object, compilation_artifacts) = function_indices.link_and_append_code(
+        object,
+        compiler,
+        tunables,
+        memory_guaranteed_dense_image_size,
+        compiled_funcs,
+        std::iter::once(translation).collect(),
+    )?;
+
+    let info = compilation_artifacts.unwrap_as_module_info();
+    object.serialize_info(&(&info, &types));
+    let result = T::finish_object(object)?;
+
+    return Ok((result, Some((info, types))));
 }

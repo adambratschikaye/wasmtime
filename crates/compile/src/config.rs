@@ -89,3 +89,30 @@ pub fn probestack_supported(arch: Architecture) -> bool {
         Architecture::X86_64 | Architecture::Aarch64(_) | Architecture::Riscv64(_)
     )
 }
+
+#[derive(Clone)]
+/// Configure the strategy used for versioning in serializing and deserializing [`crate::Module`].
+pub enum ModuleVersionStrategy {
+    /// Use the wasmtime crate's Cargo package version.
+    WasmtimeVersion,
+    /// Use a custom version string. Must be at most 255 bytes.
+    Custom(String),
+    /// Emit no version string in serialization, and accept all version strings in deserialization.
+    None,
+}
+
+impl Default for ModuleVersionStrategy {
+    fn default() -> Self {
+        ModuleVersionStrategy::WasmtimeVersion
+    }
+}
+
+impl std::hash::Hash for ModuleVersionStrategy {
+    fn hash<H: std::hash::Hasher>(&self, hasher: &mut H) {
+        match self {
+            Self::WasmtimeVersion => env!("CARGO_PKG_VERSION").hash(hasher),
+            Self::Custom(s) => s.hash(hasher),
+            Self::None => {}
+        };
+    }
+}
