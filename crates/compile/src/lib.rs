@@ -31,7 +31,7 @@ use wasmtime_environ::{
     Compiler, DefinedFuncIndex, FuncIndex, FunctionBodyData, ModuleTranslation, ModuleType,
     ModuleTypes, PrimaryMap, SignatureIndex, StaticModuleIndex, Tunables, WasmFunctionInfo,
 };
-use wasmtime_jit::{CompiledFunctionInfo, CompiledModuleInfo};
+use wasmtime_jit::{CompiledFunctionInfo, CompiledModuleInfo, ObjectBuilder};
 
 mod config;
 pub use config::{probestack_supported, CompilerConfig, ModuleVersionStrategy, Strategy};
@@ -465,7 +465,7 @@ impl FunctionIndices {
         memory_guaranteed_dense_image_size: Option<u64>,
         compiled_funcs: Vec<(String, Box<dyn Any + Send>)>,
         translations: PrimaryMap<StaticModuleIndex, ModuleTranslation<'_>>,
-    ) -> Result<(wasmtime_jit::ObjectBuilder<'a>, Artifacts)> {
+    ) -> Result<(ObjectBuilder<'a>, Artifacts)> {
         // Append all the functions to the ELF file.
         //
         // The result is a vector parallel to `compiled_funcs` where
@@ -523,7 +523,7 @@ impl FunctionIndices {
             }
         }
 
-        let mut obj = wasmtime_jit::ObjectBuilder::new(obj, tunables);
+        let mut obj = ObjectBuilder::new(obj, tunables);
         let mut artifacts = Artifacts::default();
 
         // Finally, build our binary artifacts that map things like `FuncIndex`

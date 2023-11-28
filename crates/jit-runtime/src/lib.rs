@@ -1,8 +1,7 @@
-pub use wasmtime_jit::*;
-pub mod mmap_code_memory;
-pub mod mmap_instantiate;
+mod code_memory;
+mod instantiate;
 pub mod profiling;
-pub mod unwind;
+mod unwind;
 
-pub use mmap_code_memory::MmapCodeMemory;
-pub use mmap_instantiate::CompiledModule;
+pub use code_memory::CodeMemory;
+pub use instantiate::{finish_object, CompiledModule};

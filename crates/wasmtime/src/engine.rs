@@ -12,9 +12,7 @@ use std::sync::Arc;
 use wasmtime_cache::CacheConfig;
 use wasmtime_compile::Metadata;
 use wasmtime_environ::{FlagValue, ObjectKind};
-use wasmtime_jit_runtime::{
-    profiling::ProfilingAgent, unwind::UnwindRegistration, CodeMemory, MmapCodeMemory,
-};
+use wasmtime_jit_runtime::{profiling::ProfilingAgent, CodeMemory};
 use wasmtime_runtime::{CompiledModuleIdAllocator, InstanceAllocator, MmapVec};
 
 mod serialization;
@@ -644,7 +642,7 @@ impl Engine {
         &self,
         bytes: &[u8],
         expected: ObjectKind,
-    ) -> Result<Arc<MmapCodeMemory>> {
+    ) -> Result<Arc<CodeMemory>> {
         self.load_code(MmapVec::from_slice(bytes)?, expected)
     }
 
@@ -653,7 +651,7 @@ impl Engine {
         &self,
         path: &Path,
         expected: ObjectKind,
-    ) -> Result<Arc<MmapCodeMemory>> {
+    ) -> Result<Arc<CodeMemory>> {
         self.load_code(
             MmapVec::from_file(path).with_context(|| {
                 format!("failed to create file mapping for: {}", path.display())
@@ -662,14 +660,9 @@ impl Engine {
         )
     }
 
-    pub(crate) fn load_code(
-        &self,
-        mmap: MmapVec,
-        expected: ObjectKind,
-    ) -> Result<Arc<MmapCodeMemory>> {
+    pub(crate) fn load_code(&self, mmap: MmapVec, expected: ObjectKind) -> Result<Arc<CodeMemory>> {
         serialization::check_compatible(self, &mmap, expected)?;
-        let mut code =
-            MmapCodeMemory::new(CodeMemory::new(mmap, UnwindRegistration::SECTION_NAME)?);
+        let mut code = CodeMemory::new(mmap)?;
         code.publish()?;
         Ok(Arc::new(code))
     }

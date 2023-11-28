@@ -11,7 +11,7 @@ use std::{
     ptr::NonNull,
     sync::{Arc, RwLock},
 };
-use wasmtime_jit_runtime::MmapCodeMemory;
+use wasmtime_jit_runtime::CodeMemory;
 use wasmtime_runtime::{ModuleInfo, VMSharedSignatureIndex, VMWasmCallFunction};
 
 /// Used for registering modules with a store.
@@ -257,7 +257,7 @@ impl LoadedCode {
 // are removed from the global registry.
 static GLOBAL_CODE: Lazy<RwLock<GlobalRegistry>> = Lazy::new(Default::default);
 
-type GlobalRegistry = BTreeMap<usize, (usize, Arc<MmapCodeMemory>)>;
+type GlobalRegistry = BTreeMap<usize, (usize, Arc<CodeMemory>)>;
 
 /// Returns whether the `pc`, according to globally registered information,
 /// is a wasm trap or not.
@@ -286,7 +286,7 @@ pub fn is_wasm_trap_pc(pc: usize) -> bool {
 /// This is required to enable traps to work correctly since the signal handler
 /// will lookup in the `GLOBAL_CODE` list to determine which a particular pc
 /// is a trap or not.
-pub fn register_code(code: &Arc<MmapCodeMemory>) {
+pub fn register_code(code: &Arc<CodeMemory>) {
     let text = code.text();
     if text.is_empty() {
         return;
@@ -303,7 +303,7 @@ pub fn register_code(code: &Arc<MmapCodeMemory>) {
 /// Unregisters a code mmap from the global map.
 ///
 /// Must have been previously registered with `register`.
-pub fn unregister_code(code: &Arc<MmapCodeMemory>) {
+pub fn unregister_code(code: &Arc<CodeMemory>) {
     let text = code.text();
     if text.is_empty() {
         return;

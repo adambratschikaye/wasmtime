@@ -1,52 +1,28 @@
 //! Memory management for executable code.
 
-use crate::subslice_range;
+use crate::unwind::UnwindRegistration;
 use anyhow::{anyhow, bail, Context, Result};
 use object::read::{File, Object, ObjectSection};
 use object::ObjectSymbol;
-use std::ops::{Deref, DerefMut, Range};
+use std::mem::ManuallyDrop;
+use std::ops::Range;
 use wasmtime_environ::obj;
-
-#[cfg(target_arch = "x86_64")]
-use std::arch::x86_64::__m128i;
-
-/// TODO: doc
-pub struct LibCalls {
-    /// TODO: doc
-    pub floorf32: extern "C" fn(f32) -> f32,
-    /// TODO: doc
-    pub floorf64: extern "C" fn(f64) -> f64,
-    /// TODO: doc
-    pub nearestf32: extern "C" fn(f32) -> f32,
-    /// TODO: doc
-    pub nearestf64: extern "C" fn(f64) -> f64,
-    /// TODO: doc
-    pub ceilf32: extern "C" fn(f32) -> f32,
-    /// TODO: doc
-    pub ceilf64: extern "C" fn(f64) -> f64,
-    /// TODO: doc
-    pub truncf32: extern "C" fn(f32) -> f32,
-    /// TODO: doc
-    pub truncf64: extern "C" fn(f64) -> f64,
-    /// TODO: doc
-    pub fmaf32: extern "C" fn(f32, f32, f32) -> f32,
-    /// TODO: doc
-    pub fmaf64: extern "C" fn(f64, f64, f64) -> f64,
-    #[cfg(target_arch = "x86_64")]
-    #[allow(improper_ctypes_definitions)]
-    /// TODO: doc
-    pub x86_pshufb: extern "C" fn(__m128i, __m128i) -> __m128i,
-}
+use wasmtime_jit_icache_coherence as icache_coherence;
+use wasmtime_runtime::libcalls;
+use wasmtime_runtime::MmapVec;
 
 /// Management of executable memory within a `MmapVec`
 ///
 /// This type consumes ownership of a region of memory and will manage the
 /// executable permissions of the contained JIT code as necessary.
-pub struct CodeMemory<T> {
+pub struct CodeMemory {
     // NB: these are `ManuallyDrop` because `unwind_registration` must be
     // dropped first since it refers to memory owned by `mmap`.
-    mmap: T,
+    mmap: ManuallyDrop<MmapVec>,
+    unwind_registration: ManuallyDrop<Option<UnwindRegistration>>,
+    published: bool,
     enable_branch_protection: bool,
+
     relocations: Vec<(usize, obj::LibCall)>,
 
     // Ranges within `self.mmap` of where the particular sections lie.
@@ -60,18 +36,28 @@ pub struct CodeMemory<T> {
     dwarf: Range<usize>,
 }
 
-fn _assert() {
-    fn _assert_send_sync<T: Send + Sync>() {}
-    _assert_send_sync::<CodeMemory<Vec<u8>>>();
+impl Drop for CodeMemory {
+    fn drop(&mut self) {
+        // Drop `unwind_registration` before `self.mmap`
+        unsafe {
+            ManuallyDrop::drop(&mut self.unwind_registration);
+            ManuallyDrop::drop(&mut self.mmap);
+        }
+    }
 }
 
-impl<T: Deref<Target = [u8]> + DerefMut> CodeMemory<T> {
+fn _assert() {
+    fn _assert_send_sync<T: Send + Sync>() {}
+    _assert_send_sync::<CodeMemory>();
+}
+
+impl CodeMemory {
     /// Creates a new `CodeMemory` by taking ownership of the provided
     /// `MmapVec`.
     ///
     /// The returned `CodeMemory` manages the internal `MmapVec` and the
     /// `publish` method is used to actually make the memory executable.
-    pub fn new(mmap: T, unwind_section_name: &str) -> Result<Self> {
+    pub fn new(mmap: MmapVec) -> Result<Self> {
         let obj = File::parse(&mmap[..])
             .with_context(|| "failed to parse internal compilation artifact")?;
 
@@ -132,19 +118,21 @@ impl<T: Deref<Target = [u8]> + DerefMut> CodeMemory<T> {
                         relocations.push((offset, libcall));
                     }
                 }
+                UnwindRegistration::SECTION_NAME => unwind = range,
                 obj::ELF_WASM_DATA => wasm_data = range,
                 obj::ELF_WASMTIME_ADDRMAP => address_map_data = range,
                 obj::ELF_WASMTIME_TRAPS => trap_data = range,
                 obj::ELF_NAME_DATA => func_name_data = range,
                 obj::ELF_WASMTIME_INFO => info_data = range,
                 obj::ELF_WASMTIME_DWARF => dwarf = range,
-                other if other == unwind_section_name => unwind = range,
 
                 _ => log::debug!("ignoring section {name}"),
             }
         }
         Ok(Self {
-            mmap: mmap,
+            mmap: ManuallyDrop::new(mmap),
+            unwind_registration: ManuallyDrop::new(None),
+            published: false,
             enable_branch_protection: enable_branch_protection
                 .ok_or_else(|| anyhow!("missing `{}` section", obj::ELF_WASM_BTI))?,
             text,
@@ -161,7 +149,7 @@ impl<T: Deref<Target = [u8]> + DerefMut> CodeMemory<T> {
 
     /// Returns a reference to the underlying `MmapVec` this memory owns.
     #[inline]
-    pub fn mmap(&self) -> &T {
+    pub fn mmap(&self) -> &MmapVec {
         &self.mmap
     }
 
@@ -170,12 +158,6 @@ impl<T: Deref<Target = [u8]> + DerefMut> CodeMemory<T> {
     #[inline]
     pub fn text(&self) -> &[u8] {
         &self.mmap[self.text.clone()]
-    }
-
-    /// TODO: doc
-    #[inline]
-    pub fn text_range(&self) -> Range<usize> {
-        self.text.clone()
     }
 
     /// Returns the contents of the `ELF_WASMTIME_DWARF` section.
@@ -221,20 +203,77 @@ impl<T: Deref<Target = [u8]> + DerefMut> CodeMemory<T> {
         &self.mmap[self.trap_data.clone()]
     }
 
-    /// TODO: document
-    #[inline]
-    pub fn unwind(&self) -> &[u8] {
-        &self.mmap[self.unwind.clone()]
+    /// Publishes the internal ELF image to be ready for execution.
+    ///
+    /// This method can only be called once and will panic if called twice. This
+    /// will parse the ELF image from the original `MmapVec` and do everything
+    /// necessary to get it ready for execution, including:
+    ///
+    /// * Change page protections from read/write to read/execute.
+    /// * Register unwinding information with the OS
+    ///
+    /// After this function executes all JIT code should be ready to execute.
+    pub fn publish(&mut self) -> Result<()> {
+        assert!(!self.published);
+        self.published = true;
+
+        if self.text().is_empty() {
+            return Ok(());
+        }
+
+        // The unsafety here comes from a few things:
+        //
+        // * We're actually updating some page protections to executable memory.
+        //
+        // * We're registering unwinding information which relies on the
+        //   correctness of the information in the first place. This applies to
+        //   both the actual unwinding tables as well as the validity of the
+        //   pointers we pass in itself.
+        unsafe {
+            // First, if necessary, apply relocations. This can happen for
+            // things like libcalls which happen late in the lowering process
+            // that don't go through the Wasm-based libcalls layer that's
+            // indirected through the `VMContext`. Note that most modules won't
+            // have relocations, so this typically doesn't do anything.
+            self.apply_relocations()?;
+
+            // Next freeze the contents of this image by making all of the
+            // memory readonly. Nothing after this point should ever be modified
+            // so commit everything. For a compiled-in-memory image this will
+            // mean IPIs to evict writable mappings from other cores. For
+            // loaded-from-disk images this shouldn't result in IPIs so long as
+            // there weren't any relocations because nothing should have
+            // otherwise written to the image at any point either.
+            self.mmap.make_readonly(0..self.mmap.len())?;
+
+            let text = self.text();
+
+            // Clear the newly allocated code from cache if the processor requires it
+            //
+            // Do this before marking the memory as R+X, technically we should be able to do it after
+            // but there are some CPU's that have had errata about doing this with read only memory.
+            icache_coherence::clear_cache(text.as_ptr().cast(), text.len())
+                .expect("Failed cache clear");
+
+            // Switch the executable portion from readonly to read/execute.
+            self.mmap
+                .make_executable(self.text.clone(), self.enable_branch_protection)
+                .context("unable to make memory executable")?;
+
+            // Flush any in-flight instructions from the pipeline
+            icache_coherence::pipeline_flush_mt().expect("Failed pipeline flush");
+
+            // With all our memory set up use the platform-specific
+            // `UnwindRegistration` implementation to inform the general
+            // runtime that there's unwinding information available for all
+            // our just-published JIT functions.
+            self.register_unwind_info()?;
+        }
+
+        Ok(())
     }
 
-    /// TODO: document
-    #[inline]
-    pub fn enable_branch_protection(&self) -> bool {
-        self.enable_branch_protection
-    }
-
-    /// TODO: document
-    pub unsafe fn apply_relocations(&mut self, libcalls: LibCalls) -> Result<()> {
+    unsafe fn apply_relocations(&mut self) -> Result<()> {
         if self.relocations.is_empty() {
             return Ok(());
         }
@@ -242,18 +281,18 @@ impl<T: Deref<Target = [u8]> + DerefMut> CodeMemory<T> {
         for (offset, libcall) in self.relocations.iter() {
             let offset = self.text.start + offset;
             let libcall = match libcall {
-                obj::LibCall::FloorF32 => libcalls.floorf32 as usize,
-                obj::LibCall::FloorF64 => libcalls.floorf64 as usize,
-                obj::LibCall::NearestF32 => libcalls.nearestf32 as usize,
-                obj::LibCall::NearestF64 => libcalls.nearestf64 as usize,
-                obj::LibCall::CeilF32 => libcalls.ceilf32 as usize,
-                obj::LibCall::CeilF64 => libcalls.ceilf64 as usize,
-                obj::LibCall::TruncF32 => libcalls.truncf32 as usize,
-                obj::LibCall::TruncF64 => libcalls.truncf64 as usize,
-                obj::LibCall::FmaF32 => libcalls.fmaf32 as usize,
-                obj::LibCall::FmaF64 => libcalls.fmaf64 as usize,
+                obj::LibCall::FloorF32 => libcalls::relocs::floorf32 as usize,
+                obj::LibCall::FloorF64 => libcalls::relocs::floorf64 as usize,
+                obj::LibCall::NearestF32 => libcalls::relocs::nearestf32 as usize,
+                obj::LibCall::NearestF64 => libcalls::relocs::nearestf64 as usize,
+                obj::LibCall::CeilF32 => libcalls::relocs::ceilf32 as usize,
+                obj::LibCall::CeilF64 => libcalls::relocs::ceilf64 as usize,
+                obj::LibCall::TruncF32 => libcalls::relocs::truncf32 as usize,
+                obj::LibCall::TruncF64 => libcalls::relocs::truncf64 as usize,
+                obj::LibCall::FmaF32 => libcalls::relocs::fmaf32 as usize,
+                obj::LibCall::FmaF64 => libcalls::relocs::fmaf64 as usize,
                 #[cfg(target_arch = "x86_64")]
-                obj::LibCall::X86Pshufb => libcalls.x86_pshufb as usize,
+                obj::LibCall::X86Pshufb => libcalls::relocs::x86_pshufb as usize,
                 #[cfg(not(target_arch = "x86_64"))]
                 obj::LibCall::X86Pshufb => unreachable!(),
             };
@@ -265,4 +304,34 @@ impl<T: Deref<Target = [u8]> + DerefMut> CodeMemory<T> {
         }
         Ok(())
     }
+
+    unsafe fn register_unwind_info(&mut self) -> Result<()> {
+        if self.unwind.len() == 0 {
+            return Ok(());
+        }
+        let text = self.text();
+        let unwind_info = &self.mmap[self.unwind.clone()];
+        let registration =
+            UnwindRegistration::new(text.as_ptr(), unwind_info.as_ptr(), unwind_info.len())
+                .context("failed to create unwind info registration")?;
+        *self.unwind_registration = Some(registration);
+        Ok(())
+    }
+}
+
+/// Returns the range of `inner` within `outer`, such that `outer[range]` is the
+/// same as `inner`.
+///
+/// This method requires that `inner` is a sub-slice of `outer`, and if that
+/// isn't true then this method will panic.
+pub fn subslice_range(inner: &[u8], outer: &[u8]) -> Range<usize> {
+    if inner.len() == 0 {
+        return 0..0;
+    }
+
+    assert!(outer.as_ptr() <= inner.as_ptr());
+    assert!((&inner[inner.len() - 1] as *const _) <= (&outer[outer.len() - 1] as *const _));
+
+    let start = inner.as_ptr() as usize - outer.as_ptr() as usize;
+    start..start + inner.len()
 }

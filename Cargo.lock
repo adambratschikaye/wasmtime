@@ -3253,6 +3253,7 @@ dependencies = [
  "wasmtime-cranelift",
  "wasmtime-environ",
  "wasmtime-fiber",
+ "wasmtime-jit",
  "wasmtime-jit-runtime",
  "wasmtime-runtime",
  "wasmtime-wasi",

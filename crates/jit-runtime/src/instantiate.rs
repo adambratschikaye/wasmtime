@@ -1,4 +1,4 @@
-use crate::{profiling::ProfilingAgent, MmapCodeMemory};
+use crate::{code_memory::CodeMemory, profiling::ProfilingAgent};
 use anyhow::{Context, Error, Result};
 use object::write::WritableBuffer;
 use std::convert::TryFrom;
@@ -10,8 +10,8 @@ use wasmtime_environ::{
     StackMapInformation, WasmFunctionInfo,
 };
 use wasmtime_jit::{
-    create_gdbjit_image, CodeMemory, CompiledFunctionInfo, CompiledModuleInfo, FunctionName,
-    Metadata, ObjectBuilder,
+    create_gdbjit_image, CompiledFunctionInfo, CompiledModuleInfo, FunctionName, Metadata,
+    ObjectBuilder,
 };
 use wasmtime_runtime::{
     CompiledModuleId, CompiledModuleIdAllocator, GdbJitImageRegistration, MmapVec,
@@ -23,7 +23,7 @@ pub struct CompiledModule {
     funcs: PrimaryMap<DefinedFuncIndex, CompiledFunctionInfo>,
     wasm_to_native_trampolines: Vec<(SignatureIndex, FunctionLoc)>,
     meta: Metadata,
-    code_memory: Arc<MmapCodeMemory>,
+    code_memory: Arc<CodeMemory>,
     dbg_jit_registration: Option<GdbJitImageRegistration>,
     /// A unique ID used to register this module with the engine.
     unique_id: CompiledModuleId,
@@ -48,7 +48,7 @@ impl CompiledModule {
     /// The `profiler` argument here is used to inform JIT profiling runtimes
     /// about new code that is loaded.
     pub fn from_artifacts(
-        code_memory: Arc<MmapCodeMemory>,
+        code_memory: Arc<CodeMemory>,
         info: CompiledModuleInfo,
         profiler: &dyn ProfilingAgent,
         id_allocator: &CompiledModuleIdAllocator,
@@ -100,8 +100,8 @@ impl CompiledModule {
     }
 
     /// Returns the underlying owned mmap of this compiled image.
-    pub fn code_memory(&self) -> &CodeMemory<MmapVec> {
-        self.code_memory.memory()
+    pub fn code_memory(&self) -> &CodeMemory {
+        &self.code_memory
     }
 
     /// Returns the text section of the ELF image for this compiled module.
