@@ -475,6 +475,7 @@ pub use anyhow::{Error, Result};
 #[cfg(feature = "component-model")]
 pub mod component;
 
+pub use wasmtime_compile::ModuleVersionStrategy;
 pub use wasmtime_compile::Strategy;
 
 cfg_if::cfg_if! {
