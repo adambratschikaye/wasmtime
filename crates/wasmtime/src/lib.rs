@@ -407,9 +407,6 @@
 #[macro_use]
 mod func;
 
-// #[cfg(any(feature = "cranelift", feature = "winch"))]
-// mod compiler;
-
 mod code;
 mod config;
 mod engine;
