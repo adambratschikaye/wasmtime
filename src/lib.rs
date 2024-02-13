@@ -6,7 +6,5 @@
 
 pub mod commands;
 
-pub(crate) mod common;
-
 #[cfg(feature = "old-cli")]
 pub mod old_cli;

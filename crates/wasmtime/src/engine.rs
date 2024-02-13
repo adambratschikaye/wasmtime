@@ -377,6 +377,7 @@ impl Engine {
         }
 
         #[allow(unused_assignments)]
+        #[allow(unused_mut)]
         let mut enabled = None;
 
         #[cfg(target_arch = "aarch64")]

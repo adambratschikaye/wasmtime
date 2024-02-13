@@ -100,6 +100,9 @@ impl CompileCommand {
         });
 
         let output_bytes = if wasmparser::Parser::is_component(&input) {
+            #[cfg(not(feature = "component-model"))]
+            bail!("Cannot compile a component: 'component-model' feature is not enabled");
+            #[cfg(feature = "component-model")]
             engine.precompile_component(&input)?
         } else {
             engine.precompile_module(&input)?

@@ -812,7 +812,7 @@ impl RunCommand {
             dirs.push((host, guest));
         }
 
-        let run = crate::common::RunCommon {
+        let run = crate::commands::RunCommon {
             common,
             allow_precompiled,
             profile: profile.map(|p| p.convert()),
@@ -988,10 +988,10 @@ impl CommonOptions {
 }
 
 impl Profile {
-    pub fn convert(self) -> crate::common::Profile {
+    pub(crate) fn convert(self) -> crate::commands::Profile {
         match self {
-            Profile::Native(s) => crate::common::Profile::Native(s),
-            Profile::Guest { path, interval } => crate::common::Profile::Guest { path, interval },
+            Profile::Native(s) => crate::commands::Profile::Native(s),
+            Profile::Guest { path, interval } => crate::commands::Profile::Guest { path, interval },
         }
     }
 }

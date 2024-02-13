@@ -37,6 +37,7 @@ struct Wasmtime {
     #[command(subcommand)]
     subcommand: Option<Subcommand>,
     #[command(flatten)]
+    #[cfg(feature = "run")]
     run: wasmtime_cli::commands::RunCommand,
 }
 
@@ -48,6 +49,7 @@ fn version() -> &'static str {
 #[derive(Parser, PartialEq)]
 enum Subcommand {
     /// Runs a WebAssembly module
+    #[cfg(feature = "run")]
     Run(wasmtime_cli::commands::RunCommand),
 
     /// Controls Wasmtime configuration settings
@@ -78,8 +80,16 @@ enum Subcommand {
 impl Wasmtime {
     /// Executes the command.
     pub fn execute(self) -> Result<()> {
+        #[cfg(feature = "run")]
         let subcommand = self.subcommand.unwrap_or(Subcommand::Run(self.run));
+        #[cfg(not(feature = "run"))]
+        #[allow(unused)]
+        let subcommand = self
+            .subcommand
+            .expect("Run feature not enabled, subcommand must be provided");
+        #[allow(unreachable_code)]
         match subcommand {
+            #[cfg(feature = "run")]
             Subcommand::Run(c) => c.execute(),
 
             #[cfg(feature = "cache")]
