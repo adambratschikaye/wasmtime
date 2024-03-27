@@ -65,9 +65,10 @@ fn add_nan_canon_seq(pos: &mut FuncCursor, inst: Inst) {
     let new_res = pos.func.dfg.replace_result(val, val_type);
     let _next_inst = pos.next_inst().expect("block missing terminator!");
 
-    // Insert a comparison instruction, to check if `inst_res` is NaN. Select
-    // the canonical NaN value if `val` is NaN, assign the result to `inst`.
-    let is_nan = pos.ins().fcmp(FloatCC::NotEqual, new_res, new_res);
+    // Insert a comparison instruction, to check if `inst_res` is NaN (comparing
+    // against NaN is always unordered). Select the canonical NaN value if `val`
+    // is NaN, assign the result to `inst`.
+    let is_nan = pos.ins().fcmp(FloatCC::Unordered, new_res, new_res);
 
     let scalar_select = |pos: &mut FuncCursor, canon_nan: Value| {
         pos.ins()
