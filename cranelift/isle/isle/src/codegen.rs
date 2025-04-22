@@ -453,11 +453,8 @@ impl<L: Length, C> Length for ContextIterWrapper<L, C> {{
                     ReturnKind::Iterator => String::new(),
                     ReturnKind::Option => "None".to_string(),
                     ReturnKind::Plain => format!(
-                        "unreachable!(\"no rule matched for term {{}} at {{}}; should it be partial?\", {:?}, {:?})",
+                        "unreachable!(\"no rule matched for term {{}}; should it be partial?\", {:?})",
                         term_name,
-                        termdata
-                            .decl_pos
-                            .pretty_print_line(&self.files)
                     ),
                 }
             };
